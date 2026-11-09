@@ -10,11 +10,11 @@ export function priceFromEvent(event) {
   return null;
 }
 
-export function shouldEnter(candidate, price, config) {
+export function shouldEnter(candidate, marketCapUsd, config) {
   if (!candidate.pulledBack || candidate.trades < config.minTrades) return false;
   if (candidate.buys < config.minBuys || candidate.buyers.size < config.minUniqueBuyers) return false;
-  if (price < config.minMarketCapSol || price > config.maxMarketCapSol) return false;
-  return price >= candidate.lowPrice * (1 + config.bouncePct);
+  if (!Number.isFinite(marketCapUsd) || marketCapUsd < config.minMarketCapUsd || marketCapUsd > config.maxMarketCapUsd) return false;
+  return marketCapUsd >= candidate.lowMarketCapUsd * (1 + config.bouncePct);
 }
 
 export function estimateNetProceeds(position, currentPrice, config) {

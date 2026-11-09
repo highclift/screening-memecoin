@@ -14,35 +14,37 @@ const HOST = "127.0.0.1";
 const app = express();
 
 const DEFAULT_SETTINGS = {
+  socialMode: "twitter",
   paperStartBalanceSol: 1,
   buyAmountSol: 0.01,
   maxOpenPositions: 3,
   maxEntriesPerDay: 20,
   maxActiveCandidates: 500,
-  minMarketCapSol: 0,
-  maxMarketCapSol: 150,
-  minTrades: 8,
-  minBuys: 5,
-  minUniqueBuyers: 4,
-  maxCandidateAgeSeconds: 180,
-  pullbackPct: 0.18,
-  bouncePct: 0.06,
-  takeProfitPct: 0.30,
-  stopLossPct: 0.20,
-  maxHoldSeconds: 300,
+  minMarketCapUsd: 40_000,
+  maxMarketCapUsd: 160_000,
+  minTrades: 25,
+  minBuys: 14,
+  minUniqueBuyers: 8,
+  maxCandidateAgeSeconds: 240,
+  pullbackPct: 0.2,
+  bouncePct: 0.05,
+  takeProfitPct: 0.1,
+  stopLossPct: 0.15,
+  maxHoldSeconds: 180,
   paperFeeBps: 100,
   paperSlippageBps: 200,
   maxDailyLossSol: 0.05,
 };
 
 const SETTINGS_TO_ENV = {
+  socialMode: "SOCIAL_MODE",
   paperStartBalanceSol: "PAPER_START_BALANCE_SOL",
   buyAmountSol: "BUY_AMOUNT_SOL",
   maxOpenPositions: "MAX_OPEN_POSITIONS",
   maxEntriesPerDay: "MAX_ENTRIES_PER_DAY",
   maxActiveCandidates: "MAX_ACTIVE_CANDIDATES",
-  minMarketCapSol: "MIN_MARKET_CAP_SOL",
-  maxMarketCapSol: "MAX_MARKET_CAP_SOL",
+  minMarketCapUsd: "MIN_MARKET_CAP_USD",
+  maxMarketCapUsd: "MAX_MARKET_CAP_USD",
   minTrades: "MIN_TRADES",
   minBuys: "MIN_BUYS",
   minUniqueBuyers: "MIN_UNIQUE_BUYERS",
@@ -148,6 +150,8 @@ function positionSnapshot(position) {
     openedAt: position.openedAt,
     entryPrice: position.entryPrice,
     lastPrice: position.lastPrice,
+    entryMarketCapUsd: position.entryMarketCapUsd ?? null,
+    currentMarketCapUsd: position.lastMarketCapUsd ?? null,
     costSol: position.costSol,
     estimatedPnlSol: estimate - position.costSol,
   };
@@ -184,6 +188,13 @@ function parseSettings(input = {}) {
   const settings = { ...DEFAULT_SETTINGS };
   for (const [name, fallback] of Object.entries(DEFAULT_SETTINGS)) {
     const value = input[name] ?? fallback;
+    if (name === "socialMode") {
+      if (typeof value !== "string" || !["off", "any", "multiple", "twitter"].includes(value)) {
+        throw new Error("socialMode must be off, any, multiple, or twitter.");
+      }
+      settings[name] = value;
+      continue;
+    }
     if (typeof value === "number" || typeof value === "string") {
       settings[name] = Number(value);
     } else {
