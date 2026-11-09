@@ -8,6 +8,7 @@ function freshState(startingBalance) {
     balanceSol: startingBalance,
     positions: {},
     seenMints: [],
+    screenedMigrationMints: [],
     closedTrades: [],
     daily: { day: new Date().toISOString().slice(0, 10), entries: 0, realizedPnlSol: 0 },
   };
@@ -20,6 +21,9 @@ export function loadState(startingBalance) {
       throw new Error("invalid state shape");
     }
     parsed.closedTrades = Array.isArray(parsed.closedTrades) ? parsed.closedTrades : [];
+    parsed.screenedMigrationMints = Array.isArray(parsed.screenedMigrationMints)
+      ? parsed.screenedMigrationMints
+      : [];
     parsed.daily = parsed.daily && typeof parsed.daily === "object"
       ? parsed.daily
       : { day: new Date().toISOString().slice(0, 10), entries: 0, realizedPnlSol: 0 };

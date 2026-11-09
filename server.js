@@ -60,9 +60,22 @@ const SETTINGS_TO_ENV = {
 let worker = null;
 let workerStatus = "stopped";
 let feedConnected = false;
+let activeDataSource = "pumpportal";
+let feedSource = null;
 let sessionApiKey = "";
 let activeSettings = { ...DEFAULT_SETTINGS };
 const recentLogs = [];
+let screenerStatus = {
+  scanned: 0,
+  rejected: 0,
+  entered: 0,
+  expired: 0,
+  activeCount: 0,
+  maxActive: DEFAULT_SETTINGS.maxActiveCandidates,
+  candidates: [],
+  updatedAt: null,
+};
+const screenerDebug = [];
 
 function configuredApiKey() {
   const key = (process.env.PUMPPORTAL_API_KEY ?? "").trim();
@@ -100,6 +113,16 @@ function addLog(message, timestamp = new Date().toISOString()) {
   if (recentLogs.length > 120) recentLogs.length = 120;
 }
 
+function addScreenerDebug(level, message, timestamp = new Date().toISOString()) {
+  let safeMessage = String(message);
+  for (const secret of [sessionApiKey, configuredApiKey()].filter(Boolean)) {
+    safeMessage = safeMessage.replaceAll(secret, "[API KEY REDACTED]");
+  }
+  screenerDebug.unshift({ timestamp, level, message: safeMessage.slice(0, 500) });
+  if (screenerDebug.length > 60) screenerDebug.length = 60;
+  screenerStatus = { ...screenerStatus, updatedAt: timestamp };
+}
+
 function readPaperState() {
   try {
     return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
@@ -121,6 +144,7 @@ function positionSnapshot(position) {
     mint: position.mint,
     name: position.name ?? "",
     symbol: position.symbol ?? "",
+    dataSource: position.dataSource ?? (String(position.mint ?? "").startsWith("DEMO-") ? "demo" : "pumpportal"),
     openedAt: position.openedAt,
     entryPrice: position.entryPrice,
     lastPrice: position.lastPrice,
@@ -136,7 +160,10 @@ function sendState(res) {
     runtime: {
       status: workerStatus,
       feedConnected,
+      dataSource: activeDataSource,
+      feedSource,
       mode: "paper",
+      screenerDiagnosticsVersion: 2,
       hasApiKey: Boolean(sessionApiKey || configuredApiKey()),
     },
     settings: activeSettings,
@@ -147,6 +174,8 @@ function sendState(res) {
       openPositions: positions,
       closedTrades: Array.isArray(paper.closedTrades) ? paper.closedTrades.slice(-20).reverse() : [],
     },
+    screener: screenerStatus,
+    screenerDebug,
     logs: recentLogs,
   });
 }
@@ -165,8 +194,8 @@ function parseSettings(input = {}) {
   return settings;
 }
 
-function envForSettings(settings, apiKey) {
-  const env = { ...process.env, MODE: "paper", PUMPPORTAL_API_KEY: apiKey };
+function envForSettings(settings, apiKey, dataSource = activeDataSource) {
+  const env = { ...process.env, MODE: "paper", BOT_FEED_MODE: dataSource, PUMPPORTAL_API_KEY: apiKey };
   for (const [name, envName] of Object.entries(SETTINGS_TO_ENV)) env[envName] = String(settings[name]);
   return env;
 }
@@ -183,15 +212,31 @@ app.post("/api/start", (req, res) => {
   if (worker) return res.status(409).json({ error: "Bot sudah berjalan atau sedang berhenti." });
 
   recentLogs.length = 0;
+  screenerDebug.length = 0;
+  screenerStatus = {
+    scanned: 0,
+    rejected: 0,
+    entered: 0,
+    expired: 0,
+    activeCount: 0,
+    maxActive: DEFAULT_SETTINGS.maxActiveCandidates,
+    candidates: [],
+    phase: "starting",
+    updatedAt: null,
+  };
   addLog("[debug] Permintaan start diterima dashboard.");
+  addScreenerDebug("info", "Permintaan start diterima; memvalidasi strategi dan membuat worker paper.");
   try {
     const settings = parseSettings(req.body?.settings);
+    const dataSource = "pumpportal";
     const submittedKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
     const apiKey = submittedKey || configuredApiKey();
-    const childEnv = envForSettings(settings, apiKey);
+    const childEnv = envForSettings(settings, apiKey, dataSource);
     loadConfig(childEnv);
 
     activeSettings = settings;
+    activeDataSource = dataSource;
+    feedSource = dataSource;
     sessionApiKey = apiKey;
     feedConnected = false;
     workerStatus = "starting";
@@ -204,41 +249,87 @@ app.post("/api/start", (req, res) => {
     const child = worker;
     let stderrBuffer = "";
 
-    child.on("spawn", () => addLog(`[debug] Bot worker berjalan (pid ${child.pid ?? "unknown"}).`));
+    child.on("spawn", () => {
+      addLog(`[debug] Bot worker berjalan (pid ${child.pid ?? "unknown"}).`);
+      addScreenerDebug("info", `Worker aktif (pid ${child.pid ?? "unknown"}); menunggu inisialisasi sumber data.`);
+    });
     child.stderr?.on("data", (chunk) => {
       stderrBuffer += chunk.toString();
       const lines = stderrBuffer.split(/\r?\n/);
       stderrBuffer = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) addLog(`[worker stderr] ${line.trim()}`);
+        if (line.trim()) {
+          addLog(`[worker stderr] ${line.trim()}`);
+          addScreenerDebug("error", `Worker stderr: ${line.trim()}`);
+        }
       }
     });
 
     child.on("message", (message) => {
       if (!message || typeof message !== "object") return;
-      if (message.type === "log") addLog(message.message, message.timestamp);
-      if (message.type === "feed") feedConnected = Boolean(message.connected);
-      if (message.type === "status") workerStatus = message.status;
+      if (message.type === "log") {
+        addLog(message.message, message.timestamp);
+        const text = String(message.message ?? "");
+        if (/^\[feed\]|\[demo error\]|\[settings error\]|\b(error|exception|gagal)\b/i.test(text)) {
+          const level = /error|exception|gagal|failed|server response|unauthorized|\b40[13]\b|timed out|ECONN|ENOTFOUND|EAI_AGAIN|refused|reset/i.test(text)
+            ? "error"
+            : /disconnected|reconnecting/i.test(text) ? "warning" : "info";
+          addScreenerDebug(level, text, message.timestamp);
+        }
+      }
+      if (message.type === "feed") {
+        feedConnected = Boolean(message.connected);
+        feedSource = message.source ?? activeDataSource;
+        if (feedConnected) {
+          addScreenerDebug("info", "Feed PumpPortal terhubung; menunggu launch baru untuk di-screen.");
+        } else {
+          addScreenerDebug("warning", "Feed terputus; worker akan mencoba menghubungkan ulang.");
+        }
+      }
+      if (message.type === "status") {
+        workerStatus = message.status;
+        if (message.status === "running") addScreenerDebug("info", "Worker siap; screener berjalan.");
+      }
+      if (message.type === "screener-status" && message.status && typeof message.status === "object") {
+        screenerStatus = message.status;
+      }
+      if (message.type === "screener-debug" && message.entry && typeof message.entry === "object") {
+        screenerDebug.unshift(message.entry);
+        if (screenerDebug.length > 60) screenerDebug.length = 60;
+      }
     });
-    child.on("error", () => {
-      addLog("Bot worker gagal dijalankan. Periksa instalasi dependency dan log terminal.");
+    child.on("error", (error) => {
+      addLog(`[worker error] ${error.message}`);
       workerStatus = "error";
+      addScreenerDebug("error", `Worker gagal dijalankan: ${error.message}`);
     });
     child.on("exit", (code, signal) => {
-      if (stderrBuffer.trim()) addLog(`[worker stderr] ${stderrBuffer.trim()}`);
+      if (stderrBuffer.trim()) {
+        addLog(`[worker stderr] ${stderrBuffer.trim()}`);
+        addScreenerDebug("error", `Worker stderr: ${stderrBuffer.trim()}`);
+      }
       if (worker !== child) return;
       worker = null;
       feedConnected = false;
       workerStatus = code === 0 || signal === "SIGTERM" ? "stopped" : "error";
       sessionApiKey = "";
+      screenerStatus = { ...screenerStatus, activeCount: 0, candidates: [], updatedAt: new Date().toISOString() };
       addLog(`[debug] Worker exit: code=${code ?? "null"}, signal=${signal ?? "none"}.`);
-      if (workerStatus === "error") addLog("Bot berhenti karena error; periksa pesan worker stderr di atas.");
-      else addLog("Bot dihentikan.");
+      if (workerStatus === "error") {
+        addLog("Bot berhenti karena error; periksa pesan worker stderr di atas.");
+        addScreenerDebug("error", `Worker berhenti karena error (code ${code ?? "null"}, signal ${signal ?? "none"}).`);
+      } else {
+        addLog("Bot dihentikan.");
+        addScreenerDebug("info", "Scanner dihentikan; tidak ada token yang sedang di-screen.");
+      }
     });
 
     res.json({ ok: true, status: workerStatus });
   } catch (error) {
+    workerStatus = "error";
+    screenerStatus = { ...screenerStatus, phase: "error", updatedAt: new Date().toISOString() };
     addLog(`[start error] ${error.message}`);
+    addScreenerDebug("error", `Start gagal: ${error.message}`);
     res.status(400).json({ error: error.message });
   }
 });
@@ -250,7 +341,7 @@ app.post("/api/settings", (req, res) => {
 
   try {
     const settings = parseSettings(req.body?.settings);
-    loadConfig(envForSettings(settings, sessionApiKey || configuredApiKey()));
+    loadConfig(envForSettings(settings, sessionApiKey || configuredApiKey(), activeDataSource));
     const child = worker;
     child.send({ type: "update-settings", settings: settingsForWorker(settings) }, (error) => {
       if (error) {
@@ -263,6 +354,7 @@ app.post("/api/settings", (req, res) => {
     });
   } catch (error) {
     addLog(`[settings error] ${error.message}`);
+    addScreenerDebug("error", `Update strategi gagal: ${error.message}`);
     res.status(400).json({ error: error.message });
   }
 });
@@ -285,6 +377,7 @@ app.post("/api/reset-account", (req, res) => {
     balanceSol: balance,
     positions: {},
     seenMints: [],
+    screenedMigrationMints: [],
     closedTrades: [],
     daily: { day: new Date().toISOString().slice(0, 10), entries: 0, realizedPnlSol: 0 },
   };

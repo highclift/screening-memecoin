@@ -8,8 +8,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css" />
-    <script src="/app.js" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=start-diagnostics-1" />
+    <script src="/app.js?v=live-trade-diagnostics-2" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -34,9 +34,9 @@
       <main class="main-content" id="overview">
         <header class="topbar">
           <div>
-            <div class="eyebrow">SOLANA · PUMP.FUN</div>
-            <h1>Launch monitor</h1>
-            <p class="top-subtitle">Pantau launch baru dan uji aturan entry tanpa transaksi sungguhan.</p>
+            <div class="eyebrow" id="sourceEyebrow">SOLANA · PUMP.FUN FEED</div>
+            <h1>AMM token monitor</h1>
+            <p class="top-subtitle">Pantau token Pump.fun yang sudah punya pool AMM dan uji aturan entry tanpa transaksi sungguhan.</p>
           </div>
           <div class="topbar-right">
             <div class="feed-status" id="feedStatus"><span class="status-dot"></span><span>Feed terputus</span></div>
@@ -49,14 +49,25 @@
           <div class="hero-copy">
             <div class="hero-label"><span class="hero-orb"></span> PAPER ENVIRONMENT <span class="hero-divider">/</span> NO WALLET SIGNING</div>
             <h2>Uji strategimu<br /><span>sebelum masuk pasar.</span></h2>
-            <p>Scanner mengamati token baru, menunggu pullback dan pantulan, lalu mencatat hasil simulasi.</p>
+            <p>Scanner menunggu token bermigrasi ke pool AMM, lalu menyaring trade dan pembelinya sebelum mencatat entry atau exit paper.</p>
           </div>
           <div class="hero-side">
             <div class="runtime-label">STATUS SCANNER</div>
             <div class="runtime-value" id="runtimeStatus">Siap dijalankan</div>
             <div class="runtime-detail" id="runtimeDetail">Masukkan API key feed untuk mulai.</div>
             <div class="hero-stat-row"><span>Mode</span><strong>Paper only</strong></div>
-            <div class="hero-stat-row"><span>Pasangan</span><strong>SOL / token baru</strong></div>
+            <div class="hero-stat-row"><span>Pasangan</span><strong>SOL / token AMM</strong></div>
+          </div>
+        </section>
+
+        <section class="panel startup-diagnostics" aria-live="polite" aria-atomic="false">
+          <div class="panel-heading">
+            <div><div class="eyebrow">START / DIAGNOSTIK</div><h3 id="startupTitle">Memeriksa dashboard</h3></div>
+            <span class="panel-tag muted-tag" id="startupBadge">MENUNGGU</span>
+          </div>
+          <div class="startup-body">
+            <div class="startup-message" id="startupMessage">Memuat status server…</div>
+            <div class="startup-events" id="startupEvents"><div class="empty-state">Log start akan tampil di sini.</div></div>
           </div>
         </section>
 
@@ -83,6 +94,34 @@
           </article>
         </section>
 
+        <section class="panel screener-panel" id="screener">
+          <div class="panel-heading">
+            <div><div class="eyebrow">REAL-TIME MONITOR</div><h3>Debug screener</h3></div>
+            <div class="screener-total"><span class="screener-state-pill" id="screenerState">SCANNER BERHENTI</span><strong id="screenerActiveCount">0</strong><span>token sedang di-screen dari</span><strong id="screenerCapacity">500</strong></div>
+          </div>
+          <div class="screener-stats">
+            <div><span>Total ditemukan</span><strong id="screenScanned">0</strong></div>
+            <div><span>Difilter</span><strong id="screenRejected">0</strong></div>
+            <div><span>Entry paper</span><strong id="screenEntered">0</strong></div>
+            <div><span>Screening selesai</span><strong id="screenExpired">0</strong></div>
+          </div>
+          <div class="screener-content">
+            <div class="candidate-section">
+              <div class="screener-subheading"><strong>Kandidat aktif</strong><span>maks. 40 terbaru</span></div>
+              <div class="table-wrap screener-table-wrap">
+                <table class="screener-table">
+                  <thead><tr><th>Token</th><th>Sedang menunggu</th><th>Trade / buy / buyer</th><th>Harga market cap</th><th>Umur</th></tr></thead>
+                  <tbody id="screenerBody"><tr><td colspan="5" class="empty-cell">Belum ada kandidat aktif.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="screener-debug-section">
+              <div class="screener-subheading"><strong>Aktivitas screener</strong><span>log terbaru</span></div>
+              <div class="screener-debug-list" id="screenerDebugList"><div class="empty-state">Log screening muncul saat scanner berjalan.</div></div>
+            </div>
+          </div>
+        </section>
+
         <div class="content-grid">
           <div class="left-column">
             <section class="panel" id="strategy">
@@ -91,7 +130,12 @@
                 <span class="panel-tag">PAPER</span>
               </div>
               <form id="strategyForm">
-                <div class="key-box">
+                <div class="field-section">
+                  <div class="field-section-title">Sumber data live</div>
+                  <div class="inline-note">Kandidat baru dipantau setelah event migrasi ke pool AMM dari PumpPortal. Entry tetap menunggu aktivitas trade dan pembeli unik yang cukup.</div>
+                </div>
+
+                <div class="key-box" id="keyBox">
                   <div class="key-heading"><span class="key-icon">⌑</span><div><strong>PumpPortal API key</strong><small>Hanya dipakai server lokal untuk feed data.</small></div></div>
                   <label class="sr-only" for="apiKey">PumpPortal API key</label>
                   <input id="apiKey" class="text-input settings-input" type="password" autocomplete="off" spellcheck="false" placeholder="Tempel API key di sini" />
@@ -111,7 +155,7 @@
                 </div>
 
                 <div class="field-section">
-                  <div class="field-section-title">Filter launch</div>
+                  <div class="field-section-title">Filter kandidat AMM</div>
                   <div class="field-grid two-col">
                     <label>Market cap minimum <span>SOL</span><input class="number-input settings-input" name="minMarketCapSol" type="number" min="0" step="any" value="0" /></label>
                     <label>Market cap maksimum <span>SOL</span><input class="number-input settings-input" name="maxMarketCapSol" type="number" min="0.000001" step="any" value="150" /></label>
@@ -137,7 +181,7 @@
                 <details class="advanced-settings">
                   <summary>Pengaturan lanjutan <span>+</span></summary>
                   <div class="field-grid two-col advanced-grid">
-                    <label>Kandidat trade aktif<input class="number-input settings-input" name="maxActiveCandidates" type="number" min="1" step="50" value="500" /></label>
+                    <label>Kandidat trade aktif<input class="number-input settings-input" name="maxActiveCandidates" type="number" min="1" step="1" value="500" /></label>
                     <label>Fee simulasi <span>bps / sisi</span><input class="number-input settings-input" name="paperFeeBps" type="number" min="0" max="5000" step="1" value="100" /></label>
                     <label>Slippage simulasi <span>bps / sisi</span><input class="number-input settings-input" name="paperSlippageBps" type="number" min="0" max="5000" step="1" value="200" /></label>
                   </div>
@@ -189,7 +233,7 @@
             </section>
           </div>
         </div>
-        <footer>Harga market cap adalah proksi simulasi. Hasil paper tidak menjamin harga fill atau hasil live.</footer>
+        <footer>Market cap dari PumpPortal menjadi proksi harga. Hasil paper tidak menjamin harga fill atau hasil live.</footer>
       </main>
     </div>
   </body>

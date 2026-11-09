@@ -35,13 +35,16 @@ export function loadConfig(env = process.env) {
     throw new Error("This build supports MODE=paper only; no live transactions are sent.");
   }
 
+  const dataSource = "pumpportal";
+
   const apiKey = (env.PUMPPORTAL_API_KEY ?? "").trim();
   if (!apiKey || apiKey === "replace_me") {
-    throw new Error("Set PUMPPORTAL_API_KEY in your environment or .env file.");
+    throw new Error("Enter a valid PumpPortal API key. Paper trading uses live Pump.fun data.");
   }
 
   const c = {
     mode,
+    dataSource,
     apiKey,
     paperStartBalanceSol: numberFromEnv(env, "PAPER_START_BALANCE_SOL", DEFAULTS.paperStartBalanceSol, { min: 0.000001 }),
     buyAmountSol: numberFromEnv(env, "BUY_AMOUNT_SOL", DEFAULTS.buyAmountSol, { min: 0.000001 }),

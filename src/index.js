@@ -17,6 +17,16 @@ let stopping = false;
 let stateDirty = false;
 let lastStateWriteAt = 0;
 let sweepTimer;
+let screenerTimer;
+const screenerStats = {
+  scanned: 0,
+  rejected: 0,
+  entered: 0,
+  expired: 0,
+  tradeSubscriptionsRequested: 0,
+  tradeMessagesReceived: 0,
+};
+const recentFeedResponses = new Map();
 
 const apiUrl = `wss://pumpportal.fun/api/data?api-key=${encodeURIComponent(config.apiKey)}`;
 const haltFile = ".halt";
@@ -33,13 +43,69 @@ function persistState() {
   lastStateWriteAt = Date.now();
 }
 
-function rememberMint(mint) {
-  state.seenMints.push(mint);
-  if (state.seenMints.length > 20_000) state.seenMints.splice(0, state.seenMints.length - 20_000);
+function rememberScreenedMigration(mint) {
+  state.screenedMigrationMints.push(mint);
+  if (state.screenedMigrationMints.length > 20_000) {
+    state.screenedMigrationMints.splice(0, state.screenedMigrationMints.length - 20_000);
+  }
 }
 
 function markStateDirty() {
   stateDirty = true;
+}
+
+function screenerNote(level, message, mint = "") {
+  if (process.send) {
+    process.send({
+      type: "screener-debug",
+      entry: { timestamp: new Date().toISOString(), level, message, mint },
+    });
+  }
+}
+
+function candidateStage(candidate) {
+  if (candidate.blockedReason) return candidate.blockedReason;
+  if (candidate.trades < config.minTrades) return `Trade ${candidate.trades}/${config.minTrades}`;
+  if (candidate.buys < config.minBuys) return `Buy ${candidate.buys}/${config.minBuys}`;
+  if (candidate.buyers.size < config.minUniqueBuyers) return `Buyer unik ${candidate.buyers.size}/${config.minUniqueBuyers}`;
+  if (!candidate.pulledBack) return `Menunggu pullback ${(config.pullbackPct * 100).toFixed(1)}%`;
+  const rebound = candidate.lowPrice > 0 ? ((candidate.currentPrice / candidate.lowPrice) - 1) * 100 : 0;
+  if (rebound < config.bouncePct * 100) return `Menunggu pantulan ${rebound.toFixed(1)}/${(config.bouncePct * 100).toFixed(1)}%`;
+  return "Sinyal entry; cek batas risiko";
+}
+
+function publishScreenerStatus() {
+  if (!process.send) return;
+  const activeCandidates = Array.from(candidates.values()).slice(-40).map((candidate) => ({
+    mint: candidate.mint,
+    name: candidate.name,
+    symbol: candidate.symbol,
+    dataSource: config.dataSource,
+    currentPrice: candidate.currentPrice,
+    peakPrice: candidate.peakPrice,
+    lowPrice: candidate.lowPrice,
+    trades: candidate.trades,
+    buys: candidate.buys,
+    uniqueBuyers: candidate.buyers.size,
+    ageSeconds: Math.floor((Date.now() - candidate.createdAt) / 1000),
+    stage: candidateStage(candidate),
+    lastTradeAt: candidate.lastTradeAt ?? candidate.createdAt,
+  }));
+  process.send({
+    type: "screener-status",
+    status: {
+      scanned: screenerStats.scanned,
+      rejected: screenerStats.rejected,
+      entered: screenerStats.entered,
+      expired: screenerStats.expired,
+      tradeSubscriptionsRequested: screenerStats.tradeSubscriptionsRequested,
+      tradeMessagesReceived: screenerStats.tradeMessagesReceived,
+      activeCount: candidates.size,
+      maxActive: config.maxActiveCandidates,
+      candidates: activeCandidates,
+      updatedAt: new Date().toISOString(),
+    },
+  });
 }
 
 function displayName(mint) {
@@ -48,13 +114,24 @@ function displayName(mint) {
 }
 
 function send(payload) {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify(payload));
+    return true;
+  } catch (error) {
+    log(`[feed] Failed to send ${payload.method ?? "message"}: ${error.message}`);
+    return false;
+  }
 }
 
 function subscribeMint(mint) {
   if (subscribedMints.has(mint)) return;
+  if (!send({ method: "subscribeTokenTrade", keys: [mint] })) return;
   subscribedMints.add(mint);
-  send({ method: "subscribeTokenTrade", keys: [mint] });
+  screenerStats.tradeSubscriptionsRequested += 1;
+  if (screenerStats.tradeSubscriptionsRequested === 1 || screenerStats.tradeSubscriptionsRequested % 50 === 0) {
+    log(`[feed] subscribeTokenTrade requests sent: ${screenerStats.tradeSubscriptionsRequested}.`);
+  }
 }
 
 function unsubscribeMint(mint) {
@@ -71,40 +148,65 @@ function resetDailyCountersIfNeeded() {
   }
 }
 
-function onNewToken(event) {
+function rememberTokenMetadata(event) {
   const mint = typeof event.mint === "string" ? event.mint : "";
-  if (!mint || state.seenMints.includes(mint) || state.positions[mint] || candidates.has(mint)) return;
+  if (!mint) return;
+
+  const existing = tokenNames.get(mint) ?? {};
+  const name = typeof event.name === "string" ? event.name.slice(0, 80) : existing.name ?? "";
+  const symbol = typeof event.symbol === "string" ? event.symbol.slice(0, 24) : existing.symbol ?? "";
+  if (name || symbol) tokenNames.set(mint, { name, symbol });
+  if (tokenNames.size > 10_000) tokenNames.delete(tokenNames.keys().next().value);
+}
+
+function onMigration(event) {
+  const mint = typeof event.mint === "string" ? event.mint : "";
+  if (!mint || state.screenedMigrationMints.includes(mint) || state.positions[mint] || candidates.has(mint)) return;
+  screenerStats.scanned += 1;
 
   const firstPrice = priceFromEvent(event);
+  const info = tokenNames.get(mint) ?? {};
+  const name = typeof event.name === "string" ? event.name.slice(0, 80) : info.name ?? "";
+  const symbol = typeof event.symbol === "string" ? event.symbol.slice(0, 24) : info.symbol ?? "";
   if (firstPrice !== null && (firstPrice < config.minMarketCapSol || firstPrice > config.maxMarketCapSol)) {
-    rememberMint(mint);
+    screenerStats.rejected += 1;
+    rememberScreenedMigration(mint);
     markStateDirty();
+    screenerNote("filtered", "Dilewati: market cap " + firstPrice.toFixed(3) + " SOL di luar range " + config.minMarketCapSol + "–" + config.maxMarketCapSol + " SOL.", mint);
+    publishScreenerStatus();
     return;
   }
   if (candidates.size >= config.maxActiveCandidates) {
-    rememberMint(mint);
+    screenerStats.rejected += 1;
+    rememberScreenedMigration(mint);
     markStateDirty();
-    log(`[skip] ${mint} skipped; active candidate limit (${config.maxActiveCandidates}) reached.`);
+    log(`[skip] migrated token ${mint} skipped; active candidate limit (${config.maxActiveCandidates}) reached.`);
+    screenerNote("filtered", `Dilewati: kapasitas screening ${config.maxActiveCandidates} kandidat penuh.`, mint);
+    publishScreenerStatus();
     return;
   }
 
-  const name = typeof event.name === "string" ? event.name.slice(0, 80) : "";
-  const symbol = typeof event.symbol === "string" ? event.symbol.slice(0, 24) : "";
-  tokenNames.set(mint, { name, symbol });
+  if (name || symbol) tokenNames.set(mint, { name, symbol });
   candidates.set(mint, {
     mint,
+    name,
+    symbol,
     createdAt: Date.now(),
     trades: 0,
     buys: 0,
     buyers: new Set(),
+    currentPrice: firstPrice,
     peakPrice: firstPrice,
     lowPrice: firstPrice,
     pulledBack: false,
+    pool: String(event.pool ?? event.poolAddress ?? event.newPool ?? event.new_pool ?? ""),
   });
-  rememberMint(mint);
+  rememberScreenedMigration(mint);
   markStateDirty();
   subscribeMint(mint);
-  log(`[launch] ${displayName(mint)}${firstPrice ? ` mcap=${firstPrice.toFixed(3)} SOL` : ""}`);
+  log(`[migration] ${displayName(mint)}${firstPrice ? ` mcap=${firstPrice.toFixed(3)} SOL` : ""}`);
+  screenerNote("candidate", `Migrasi ke pool AMM terdeteksi; mulai screening trade ${symbol || mint}.`, mint);
+  publishScreenerStatus();
 }
 
 function closePaperPosition(mint, price, reason) {
@@ -118,6 +220,7 @@ function closePaperPosition(mint, price, reason) {
     mint,
     name: position.name,
     symbol: position.symbol,
+    dataSource: position.dataSource,
     openedAt: position.openedAt,
     closedAt: Date.now(),
     entryPrice: position.entryPrice,
@@ -131,19 +234,28 @@ function closePaperPosition(mint, price, reason) {
   delete state.positions[mint];
   persistState();
   log(`[exit:${reason}] ${displayName(mint)} pnl=${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL | balance=${state.balanceSol.toFixed(5)} SOL`);
+  screenerNote("exit", `Paper exit ${reason}; estimasi PnL ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL.`, mint);
   unsubscribeMint(mint);
+  publishScreenerStatus();
 }
 
 function openPaperPosition(candidate, price) {
   resetDailyCountersIfNeeded();
-  if (fs.existsSync(haltFile)) {
-    log(`[halt] Entry skipped for ${displayName(candidate.mint)}; remove ${haltFile} to resume entries.`);
-    return;
+  let blockedReason = "";
+  if (fs.existsSync(haltFile)) blockedReason = "Entry tertahan: file .halt aktif";
+  else if (state.daily.entries >= config.maxEntriesPerDay) blockedReason = `Entry tertahan: batas harian ${config.maxEntriesPerDay} tercapai`;
+  else if (Object.keys(state.positions).length >= config.maxOpenPositions) blockedReason = `Entry tertahan: batas ${config.maxOpenPositions} posisi terbuka`;
+  else if (state.balanceSol < config.buyAmountSol) blockedReason = "Entry tertahan: saldo paper tidak cukup";
+  else if (state.daily.realizedPnlSol <= -config.maxDailyLossSol && config.maxDailyLossSol > 0) blockedReason = `Entry tertahan: batas rugi harian ${config.maxDailyLossSol} SOL tercapai`;
+  if (blockedReason) {
+    if (candidate.blockedReason !== blockedReason) {
+      candidate.blockedReason = blockedReason;
+      screenerNote("blocked", `${blockedReason}; kandidat tetap dipantau.`, candidate.mint);
+      publishScreenerStatus();
+    }
+    return false;
   }
-  if (state.daily.entries >= config.maxEntriesPerDay) return;
-  if (Object.keys(state.positions).length >= config.maxOpenPositions) return;
-  if (state.balanceSol < config.buyAmountSol) return;
-  if (state.daily.realizedPnlSol <= -config.maxDailyLossSol && config.maxDailyLossSol > 0) return;
+  candidate.blockedReason = "";
 
   const fee = config.paperFeeBps / 10_000;
   const slippage = config.paperSlippageBps / 10_000;
@@ -160,6 +272,7 @@ function openPaperPosition(candidate, price) {
     lastPriceAt: Date.now(),
     costSol: config.buyAmountSol,
     tokenQuantity,
+    dataSource: config.dataSource,
   };
   state.balanceSol -= config.buyAmountSol;
   state.daily.entries += 1;
@@ -167,6 +280,10 @@ function openPaperPosition(candidate, price) {
   candidates.delete(candidate.mint);
   persistState();
   log(`[paper-buy] ${displayName(candidate.mint)} price=${price.toFixed(6)} spend=${config.buyAmountSol.toFixed(5)} SOL | activity=${candidate.trades} trades/${candidate.buyers.size} buyers`);
+  screenerStats.entered += 1;
+  screenerNote("entry", `Sinyal terpenuhi; paper entry ${candidate.symbol || candidate.mint} pada harga ${price.toFixed(6)}.`, candidate.mint);
+  publishScreenerStatus();
+  return true;
 }
 
 function onTokenTrade(event) {
@@ -179,10 +296,14 @@ function onTokenTrade(event) {
 
   const candidate = candidates.get(mint);
   if (candidate) {
+    candidate.currentPrice = price;
+    candidate.lastTradeAt = now;
     if (now - candidate.createdAt > config.maxCandidateAgeSeconds * 1000) {
       candidates.delete(mint);
+      screenerStats.expired += 1;
       if (!state.positions[mint]) unsubscribeMint(mint);
       log(`[expire] ${displayName(mint)} did not meet entry criteria in time.`);
+      screenerNote("expired", `Waktu screening habis; tahap terakhir: ${candidateStage(candidate)}.`, mint);
     } else {
       candidate.trades += 1;
       if (txType === "buy") {
@@ -220,8 +341,33 @@ function onMessage(data) {
   }
   if (!event || typeof event !== "object") return;
   const txType = String(event.txType ?? "").toLowerCase();
-  if (txType === "create") onNewToken(event);
-  else onTokenTrade(event);
+  if (txType === "create") rememberTokenMetadata(event);
+  else if (
+    txType === "migrate"
+    || txType === "migration"
+    || (
+      typeof event.mint === "string"
+      && Boolean(event.pool ?? event.poolAddress ?? event.newPool ?? event.new_pool)
+      && txType !== "buy"
+      && txType !== "sell"
+    )
+  ) onMigration(event);
+  else if (txType === "buy" || txType === "sell") {
+    screenerStats.tradeMessagesReceived += 1;
+    onTokenTrade(event);
+  } else {
+    const payload = JSON.stringify(event).replaceAll(config.apiKey, "[API KEY REDACTED]").slice(0, 500);
+    const level = /error|failed|unauthorized|\b40[13]\b|insufficient|fund|invalid|denied/i.test(payload) ? "error" : "info";
+    const key = `${level}|${payload}`;
+    const now = Date.now();
+    const previousAt = recentFeedResponses.get(key) ?? 0;
+    if (now - previousAt >= 30_000) {
+      recentFeedResponses.set(key, now);
+      if (recentFeedResponses.size > 100) recentFeedResponses.delete(recentFeedResponses.keys().next().value);
+      log(`[feed] PumpPortal response${txType ? ` (${txType})` : ""}: ${payload}`);
+      screenerNote(level, `PumpPortal response${txType ? ` (${txType})` : ""}: ${payload}`);
+    }
+  }
 }
 
 function connect() {
@@ -231,16 +377,17 @@ function connect() {
     reconnectDelayMs = 1000;
     subscribedMints.clear();
     send({ method: "subscribeNewToken" });
+    send({ method: "subscribeMigration" });
     for (const mint of candidates.keys()) subscribeMint(mint);
     for (const mint of Object.keys(state.positions)) subscribeMint(mint);
-    if (process.send) process.send({ type: "feed", connected: true });
-    log("[feed] Connected to PumpPortal; listening for new Pump.fun launches.");
+    if (process.send) process.send({ type: "feed", connected: true, source: "pumpportal" });
+    log("[feed] Connected to PumpPortal; listening for token launches and AMM migrations.");
   });
   socket.on("message", onMessage);
   socket.on("error", (error) => log(`[feed] ${error.message}`));
   socket.on("close", () => {
     subscribedMints.clear();
-    if (process.send) process.send({ type: "feed", connected: false });
+    if (process.send) process.send({ type: "feed", connected: false, source: "pumpportal" });
     if (stopping) return;
     log(`[feed] Disconnected; reconnecting in ${reconnectDelayMs / 1000}s.`);
     reconnectTimer = setTimeout(connect, reconnectDelayMs);
@@ -253,8 +400,10 @@ function sweep() {
   for (const [mint, candidate] of candidates) {
     if (now - candidate.createdAt > config.maxCandidateAgeSeconds * 1000) {
       candidates.delete(mint);
+      screenerStats.expired += 1;
       if (!state.positions[mint]) unsubscribeMint(mint);
       log(`[expire] ${displayName(mint)} did not meet entry criteria in time.`);
+      screenerNote("expired", `Waktu screening habis; tahap terakhir: ${candidateStage(candidate)}.`, mint);
     }
   }
   for (const [mint, position] of Object.entries(state.positions)) {
@@ -270,9 +419,11 @@ function shutdown() {
   stopping = true;
   clearTimeout(reconnectTimer);
   clearInterval(sweepTimer);
+  clearInterval(screenerTimer);
   persistState();
   socket?.close();
   log("[shutdown] Paper state saved.");
+  if (process.connected) process.disconnect();
 }
 
 process.on("SIGINT", shutdown);
@@ -284,6 +435,7 @@ process.on("message", (message) => {
       ...process.env,
       ...message.settings,
       MODE: "paper",
+      BOT_FEED_MODE: config.dataSource,
       PUMPPORTAL_API_KEY: config.apiKey,
     });
     log("[settings] Strategi diperbarui tanpa restart bot.");
@@ -299,4 +451,5 @@ log(`[strategy] pullback=${(config.pullbackPct * 100).toFixed(1)}% bounce=${(con
 if (state.daily?.day !== currentUtcDay()) resetDailyCountersIfNeeded();
 connect();
 sweepTimer = setInterval(sweep, 2000);
+screenerTimer = setInterval(publishScreenerStatus, 1000);
 if (process.send) process.send({ type: "status", status: "running" });
