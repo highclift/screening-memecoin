@@ -15,12 +15,6 @@ function fmtSol(value, digits = 4) {
   return Number.isFinite(n) ? `${n.toFixed(digits)} SOL` : "—";
 }
 
-function fmtPrice(value) {
-  if (value === null || value === undefined || value === "") return "—";
-  const n = Number(value);
-  return Number.isFinite(n) ? n.toFixed(n < 1 ? 6 : 3) : "—";
-}
-
 function shortMint(value) {
   if (!value || value.length < 14) return value || "—";
   return `${value.slice(0, 6)}…${value.slice(-5)}`;
@@ -91,6 +85,10 @@ function collectSettings() {
   const settings = {};
   for (const [name, rawValue] of new FormData(strategyForm).entries()) {
     if (name === "dataSource") continue;
+    if (name === "socialMode") {
+      settings[name] = rawValue;
+      continue;
+    }
     let value = Number(rawValue);
     if (percentageFields.has(name)) value /= 100;
     settings[name] = value;
@@ -123,7 +121,7 @@ function setRuntime(runtime) {
       ? "Menunggu koneksi ke PumpPortal."
       : runtime.hasApiKey
         ? "API key tersedia; siapkan konfigurasi lalu mulai."
-        : "Masukkan API key PumpPortal untuk mulai.";
+        : "API key PumpPortal opsional (mode gratis); tekan Mulai.";
 
   $("#startButton").classList.toggle("hidden", running);
   $("#startButton").disabled = running;
@@ -192,11 +190,39 @@ function renderPositions(positions) {
     pnl.textContent = `${pnlValue >= 0 ? "+" : ""}${pnlValue.toFixed(4)} SOL`;
     const cost = document.createElement("div");
     cost.className = "position-cost";
-    cost.textContent = `${fmtSol(position.costSol, 3)} · MC ${fmtPrice(position.lastPrice)}`;
+    cost.textContent = `${fmtSol(position.costSol, 3)} · MC masuk ${formatMc(position.entryMarketCapUsd)} · sekarang ${formatMc(position.currentMarketCapUsd)}`;
     numbers.append(pnl, cost);
     row.append(ident, numbers);
     container.append(row);
   }
+}
+
+function formatMc(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+}
+
+function formatClock(ms) {
+  return new Date(ms).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  return m ? `${m}m ${total % 60}s` : `${total}s`;
+}
+
+function mcCell(price, note) {
+  const cell = document.createElement("td");
+  cell.textContent = formatMc(price);
+  if (note) {
+    const sub = document.createElement("span");
+    sub.className = "trade-mint";
+    sub.textContent = note;
+    cell.append(sub);
+  }
+  return cell;
 }
 
 function renderClosedTrades(trades) {
@@ -205,7 +231,7 @@ function renderClosedTrades(trades) {
   if (!trades.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 3;
+    cell.colSpan = 5;
     cell.className = "empty-cell";
     cell.textContent = "Belum ada trade yang ditutup.";
     row.append(cell);
@@ -226,14 +252,30 @@ function renderClosedTrades(trades) {
       ? mint
       : tokenReference(shortMint(trade.mint), trade, "trade-mint token-link");
     tokenCell.append(tokenRef, mintRef);
+    const entryCell = mcCell(trade.entryMarketCapUsd, trade.openedAt ? `buka ${formatClock(trade.openedAt)}` : "");
+    const exitMcCell = mcCell(trade.exitMarketCapUsd, trade.closedAt ? `tutup ${formatClock(trade.closedAt)}` : "");
     const reasonCell = document.createElement("td");
     reasonCell.className = "exit-reason";
     reasonCell.textContent = String(trade.reason ?? "exit").replaceAll("-", " ");
+    if (trade.openedAt && trade.closedAt) {
+      const held = document.createElement("span");
+      held.className = "trade-mint";
+      held.textContent = `ditahan ${formatDuration(trade.closedAt - trade.openedAt)}`;
+      reasonCell.append(held);
+    }
     const pnlCell = document.createElement("td");
     pnlCell.className = signClass(trade.pnlSol);
     const pnl = Number(trade.pnlSol ?? 0);
-    pnlCell.textContent = `${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)}`;
-    row.append(tokenCell, reasonCell, pnlCell);
+    pnlCell.textContent = `${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} SOL`;
+    const cost = Number(trade.costSol);
+    if (Number.isFinite(cost) && cost > 0) {
+      const pct = (pnl / cost) * 100;
+      const pctLine = document.createElement("span");
+      pctLine.className = "trade-mint";
+      pctLine.textContent = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+      pnlCell.append(pctLine);
+    }
+    row.append(tokenCell, entryCell, exitMcCell, reasonCell, pnlCell);
     body.append(row);
   }
 }
@@ -287,7 +329,7 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
     && staleNoTradeCandidates >= 5;
   let stateTitle = "Siap dimulai";
   let stateBadge = "SIAP";
-  let stateMessage = "Masukkan API key PumpPortal lalu tekan Mulai paper scanner.";
+  let stateMessage = "API key PumpPortal opsional (mode gratis memakai DexScreener). Tekan Mulai paper scanner.";
   let stateLevel = "";
 
   if (runtime.status === "error") {
@@ -309,7 +351,7 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
     const subscriptionStats = screener.tradeSubscriptionsRequested === undefined
       ? ""
       : `Permintaan subscription: ${screener.tradeSubscriptionsRequested}; event trade diterima: ${screener.tradeMessagesReceived ?? 0}. `;
-    stateMessage = `${subscriptionStats}Koneksi PumpPortal aktif, tetapi kandidat yang sudah bermigrasi masih 0 trade. Cek respons feed di log dan wallet tertaut API key: subscribeTokenTrade mensyaratkan minimal 0,02 SOL. Ini syarat data feed, bukan saldo posisi paper.`;
+    stateMessage = `${subscriptionStats}Koneksi PumpPortal aktif, tetapi kandidat yang sudah bermigrasi masih 0 trade. Mode gratis (TRADE_SOURCE=free): tunggu beberapa detik karena DexScreener perlu mengindeks pool baru, dan cek log untuk error polling. Mode pumpportal: subscribeTokenTrade mensyaratkan wallet minimal 0,02 SOL.`;
     stateLevel = "warning";
   } else if (runtime.status === "running" && runtime.feedConnected) {
     stateTitle = "Terhubung ke PumpPortal";
@@ -326,9 +368,9 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
     stateMessage = newestClientError;
     stateLevel = "error";
   } else if (!runtime.hasApiKey) {
-    stateTitle = "API key belum diterima server";
-    stateBadge = "PERLU KEY";
-    stateMessage = "Tempel API key PumpPortal di panel konfigurasi. Key tidak muncul di status sampai scanner mulai.";
+    stateTitle = "Siap dimulai (mode gratis)";
+    stateBadge = "SIAP";
+    stateMessage = "API key tidak wajib di mode gratis. Tekan Mulai paper scanner.";
     stateLevel = "warning";
   } else if (newestServerError) {
     stateTitle = "Percobaan terakhir gagal";
@@ -459,7 +501,7 @@ function renderScreener(status = {}, debug = [], runtime = {}, logs = []) {
     const activityCell = document.createElement("td");
     activityCell.textContent = `${candidate.trades ?? 0} / ${candidate.buys ?? 0} / ${candidate.uniqueBuyers ?? 0}`;
     const priceCell = document.createElement("td");
-    priceCell.textContent = fmtPrice(candidate.currentPrice);
+    priceCell.textContent = formatMc(candidate.currentMarketCapUsd);
     const ageCell = document.createElement("td");
     ageCell.textContent = `${candidate.ageSeconds ?? 0}s`;
     row.append(tokenCell, stageCell, activityCell, priceCell, ageCell);

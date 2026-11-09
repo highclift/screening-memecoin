@@ -278,3 +278,7 @@ footer { padding: 18px 1px 2px; color: #626a5f; font-size: 9px; text-align: righ
   .form-actions .button-quiet { flex: 1; }
   footer { text-align: left; line-height: 1.6; }
 }
+
+/* trade history: PnL % line + right-aligned sub-lines */
+td:last-child .trade-mint { margin-left: auto; text-align: right; }
+.positive .trade-mint, .negative .trade-mint { color: inherit; opacity: .85; }

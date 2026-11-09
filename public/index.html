@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#10120f" />
-    <title>Launchpad — Paper Sniper</title>
+    <title>Launchpad — Entry Sniper</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
@@ -110,7 +110,7 @@
               <div class="screener-subheading"><strong>Kandidat aktif</strong><span>maks. 40 terbaru</span></div>
               <div class="table-wrap screener-table-wrap">
                 <table class="screener-table">
-                  <thead><tr><th>Token</th><th>Sedang menunggu</th><th>Trade / buy / buyer</th><th>Harga market cap</th><th>Umur</th></tr></thead>
+                  <thead><tr><th>Token</th><th>Sedang menunggu</th><th>Trade / buy / buyer</th><th>Market cap USD</th><th>Umur</th></tr></thead>
                   <tbody id="screenerBody"><tr><td colspan="5" class="empty-cell">Belum ada kandidat aktif.</td></tr></tbody>
                 </table>
               </div>
@@ -136,7 +136,7 @@
                 </div>
 
                 <div class="key-box" id="keyBox">
-                  <div class="key-heading"><span class="key-icon">⌑</span><div><strong>PumpPortal API key</strong><small>Hanya dipakai server lokal untuk feed data.</small></div></div>
+                  <div class="key-heading"><span class="key-icon">⌑</span><div><strong>PumpPortal API key (opsional)</strong><small>Tidak wajib di mode gratis. Hanya dipakai server lokal.</small></div></div>
                   <label class="sr-only" for="apiKey">PumpPortal API key</label>
                   <input id="apiKey" class="text-input settings-input" type="password" autocomplete="off" spellcheck="false" placeholder="Tempel API key di sini" />
                   <div class="key-help">Belum punya key? <a href="https://pumpportal.fun/trading-api/setup/" target="_blank" rel="noreferrer">Buat di PumpPortal ↗</a></div>
@@ -157,23 +157,30 @@
                 <div class="field-section">
                   <div class="field-section-title">Filter kandidat AMM</div>
                   <div class="field-grid two-col">
-                    <label>Market cap minimum <span>SOL</span><input class="number-input settings-input" name="minMarketCapSol" type="number" min="0" step="any" value="0" /></label>
-                    <label>Market cap maksimum <span>SOL</span><input class="number-input settings-input" name="maxMarketCapSol" type="number" min="0.000001" step="any" value="150" /></label>
-                    <label>Jumlah trade minimum<input class="number-input settings-input" name="minTrades" type="number" min="1" step="1" value="8" /></label>
-                    <label>Buy minimum<input class="number-input settings-input" name="minBuys" type="number" min="1" step="1" value="5" /></label>
-                    <label>Pembeli unik minimum<input class="number-input settings-input" name="minUniqueBuyers" type="number" min="1" step="1" value="4" /></label>
-                    <label>Umur kandidat maksimum <span>detik</span><input class="number-input settings-input" name="maxCandidateAgeSeconds" type="number" min="1" step="1" value="180" /></label>
+                    <label>Market cap minimum <span>USD</span><input class="number-input settings-input" name="minMarketCapUsd" type="number" min="0" step="any" value="40000" /></label>
+                    <label>Market cap maksimum <span>USD</span><input class="number-input settings-input" name="maxMarketCapUsd" type="number" min="0.000001" step="any" value="160000" /></label>
+                    <label>Jumlah trade minimum<input class="number-input settings-input" name="minTrades" type="number" min="1" step="1" value="25" /></label>
+                    <label>Buy minimum<input class="number-input settings-input" name="minBuys" type="number" min="1" step="1" value="14" /></label>
+                    <label>Pembeli unik minimum<input class="number-input settings-input" name="minUniqueBuyers" type="number" min="1" step="1" value="8" /></label>
+                    <label>Umur kandidat maksimum <span>detik</span><input class="number-input settings-input" name="maxCandidateAgeSeconds" type="number" min="1" step="1" value="240" /></label>
+                    <label>Syarat tautan sosial<select class="number-input settings-input" name="socialMode">
+                      <option value="twitter" selected>X/Twitter wajib</option>
+                      <option value="any">Minimal satu: X, Telegram, atau situs</option>
+                      <option value="multiple">Minimal dua jenis tautan</option>
+                      <option value="off">Tanpa filter sosial</option>
+                    </select></label>
                   </div>
+                  <div class="inline-note">Pilihan dua tautan menghitung X/Twitter, Telegram, dan situs web sebagai jenis yang berbeda.</div>
                 </div>
 
                 <div class="field-section">
                   <div class="field-section-title">Entry dan exit</div>
                   <div class="field-grid two-col">
-                    <label>Pullback dari puncak <span>%</span><input class="number-input settings-input" name="pullbackPct" type="number" min="0.1" max="95" step="any" value="18" /></label>
-                    <label>Pantulan dari titik rendah <span>%</span><input class="number-input settings-input" name="bouncePct" type="number" min="0.1" max="200" step="any" value="6" /></label>
-                    <label>Target take profit <span>%</span><input class="number-input settings-input" name="takeProfitPct" type="number" min="0.1" step="any" value="30" /></label>
-                    <label>Stop loss <span>%</span><input class="number-input settings-input" name="stopLossPct" type="number" min="0.1" max="99" step="any" value="20" /></label>
-                    <label>Waktu maksimum posisi <span>detik</span><input class="number-input settings-input" name="maxHoldSeconds" type="number" min="1" step="1" value="300" /></label>
+                    <label>Pullback dari puncak <span>%</span><input class="number-input settings-input" name="pullbackPct" type="number" min="0.1" max="95" step="any" value="20" /></label>
+                    <label>Pantulan dari titik rendah <span>%</span><input class="number-input settings-input" name="bouncePct" type="number" min="0.1" max="200" step="any" value="5" /></label>
+                    <label>Target take profit <span>%</span><input class="number-input settings-input" name="takeProfitPct" type="number" min="0.1" step="any" value="10" /></label>
+                    <label>Stop loss <span>%</span><input class="number-input settings-input" name="stopLossPct" type="number" min="0.1" max="99" step="any" value="15" /></label>
+                    <label>Waktu maksimum posisi <span>detik</span><input class="number-input settings-input" name="maxHoldSeconds" type="number" min="1" step="1" value="180" /></label>
                     <label>Batas rugi harian <span>SOL</span><input class="number-input settings-input" name="maxDailyLossSol" type="number" min="0" step="any" value="0.05" /></label>
                   </div>
                 </div>
@@ -221,19 +228,19 @@
               </div>
               <div class="table-wrap">
                 <table>
-                  <thead><tr><th>Token</th><th>Exit</th><th>PnL</th></tr></thead>
-                  <tbody id="tradesBody"><tr><td colspan="3" class="empty-cell">Belum ada trade yang ditutup.</td></tr></tbody>
+                  <thead><tr><th>Token</th><th>MC masuk (USD)</th><th>MC keluar (USD)</th><th>Exit</th><th>PnL</th></tr></thead>
+                  <tbody id="tradesBody"><tr><td colspan="5" class="empty-cell">Belum ada trade yang ditutup.</td></tr></tbody>
                 </table>
               </div>
             </section>
 
             <section class="info-card">
               <div class="info-mark">i</div>
-              <div><strong>Feed data berbiaya</strong><p>PumpPortal mengenakan 0.01 SOL per 10.000 trade feed; wallet yang terhubung ke API key perlu saldo minimal 0.02 SOL. Launch feed gratis.</p><a href="https://pumpportal.fun/fees/" target="_blank" rel="noreferrer">Lihat rincian biaya ↗</a></div>
+              <div><strong>Mode data gratis</strong><p>Launch dan migrasi dari PumpPortal (gratis); harga dan jumlah trade dari DexScreener, buyer unik dari GeckoTerminal. Tidak perlu saldo SOL. Untuk memakai stream trade PumpPortal berbayar, set TRADE_SOURCE=pumpportal di .env.</p><a href="https://pumpportal.fun/fees/" target="_blank" rel="noreferrer">Rincian biaya PumpPortal ↗</a></div>
             </section>
           </div>
         </div>
-        <footer>Market cap dari PumpPortal menjadi proksi harga. Hasil paper tidak menjamin harga fill atau hasil live.</footer>
+        <footer>Market cap USD dihitung dari harga token dan SOL/USD. Hasil paper tidak menjamin harga fill atau hasil live.</footer>
       </main>
     </div>
   </body>
