@@ -29,6 +29,15 @@ function numberFromEnv(env, name, fallback, { min = 0, max = Number.POSITIVE_INF
   return value;
 }
 
+function boolFromEnv(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`${name} must be true or false.`);
+}
+
 export function loadConfig(env = process.env) {
   const mode = (env.MODE ?? "paper").trim().toLowerCase();
   if (mode !== "paper") {
@@ -55,12 +64,26 @@ export function loadConfig(env = process.env) {
     throw new Error("Enter a valid PumpPortal API key (required when TRADE_SOURCE=pumpportal).");
   }
 
+  // Optional Solana RPC endpoint for the holder-concentration filter. It may contain a provider
+  // key, so it is never logged or sent to the dashboard.
+  const solanaRpcUrl = (env.SOLANA_RPC_URL ?? "").trim();
+  if (solanaRpcUrl && !/^https?:\/\//i.test(solanaRpcUrl)) {
+    throw new Error("SOLANA_RPC_URL must start with http:// or https://.");
+  }
+
+  const metadataHosts = (env.METADATA_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean);
+
   const c = {
     mode,
     dataSource,
     tradeSource,
     socialMode,
     apiKey,
+    solanaRpcUrl,
+    metadataHosts: metadataHosts.length ? metadataHosts : undefined,
     pollIntervalMs: numberFromEnv(env, "POLL_INTERVAL_MS", 3000, { min: 1000, max: 60000 }),
     buyerCheckIntervalMs: numberFromEnv(env, "BUYER_CHECK_INTERVAL_MS", 5000, { min: 2000, max: 120000 }),
     paperStartBalanceSol: numberFromEnv(env, "PAPER_START_BALANCE_SOL", DEFAULTS.paperStartBalanceSol, { min: 0.000001 }),
@@ -82,6 +105,16 @@ export function loadConfig(env = process.env) {
     paperFeeBps: numberFromEnv(env, "PAPER_FEE_BPS", DEFAULTS.paperFeeBps, { min: 0, max: 5000 }),
     paperSlippageBps: numberFromEnv(env, "PAPER_SLIPPAGE_BPS", DEFAULTS.paperSlippageBps, { min: 0, max: 5000 }),
     maxDailyLossSol: numberFromEnv(env, "MAX_DAILY_LOSS_SOL", DEFAULTS.maxDailyLossSol),
+
+    // Filter + analyst pipeline (env-only; not exposed in the dashboard form).
+    minScore: numberFromEnv(env, "MIN_SCORE", 0.5, { min: 0, max: 1 }),
+    minLiquidityUsd: numberFromEnv(env, "MIN_LIQUIDITY_USD", 5000, { min: 0 }),
+    maxDevRugs: numberFromEnv(env, "MAX_DEV_RUGS", 1, { min: 0, max: 1000 }),
+    maxDevLaunches: numberFromEnv(env, "MAX_DEV_LAUNCHES", 5, { min: 0, max: 100000 }),
+    rugDropPct: numberFromEnv(env, "RUG_DROP_PCT", 0.8, { min: 0.3, max: 0.99 }),
+    maxTopHoldersPct: numberFromEnv(env, "MAX_TOP_HOLDERS_PCT", 35, { min: 1, max: 100 }),
+    topHoldersCount: numberFromEnv(env, "TOP_HOLDERS_COUNT", 5, { min: 1, max: 19 }),
+    topHoldersSkipLargest: boolFromEnv(env, "TOP_HOLDERS_SKIP_LARGEST", true),
   };
 
   if (c.minMarketCapUsd > c.maxMarketCapUsd) {

@@ -3,16 +3,24 @@ import fs from "node:fs";
 import WebSocket from "ws";
 import { loadConfig } from "./config.js";
 import { currentUtcDay, loadState, saveState } from "./state.js";
-import { estimateNetProceeds, exitReason, priceFromEvent, shouldEnter } from "./strategy.js";
+import { estimateNetProceeds, exitReason, priceFromEvent, shouldEnter, updateLevels } from "./strategy.js";
 import { fetchDexSnapshots, fetchSolUsdPrice, fetchUniqueBuyers } from "./pricefeed.js";
 import { fetchTokenMetadata, mergeSocials, parseSocials, socialVerdict } from "./social.js";
+import { createDevBook } from "./devbook.js";
+import { createJournal } from "./journal.js";
+import { fetchHolderStats } from "./holders.js";
+import { devReason, holderReason, liquidityReason } from "./filters.js";
+import { scoreCandidate } from "./analyst.js";
 
 let config = loadConfig();
 const state = loadState(config.paperStartBalanceSol);
+const journal = createJournal();
+const devBook = createDevBook();
 const candidates = new Map();
 const subscribedMints = new Set();
 const tokenNames = new Map();
 const tokenUris = new Map(); // mint -> metadata uri, remembered from launch events (bounded)
+const funnel = {}; // rejection / expiry category -> count since this run started
 let socket;
 let reconnectTimer;
 let reconnectDelayMs = 1000;
@@ -21,6 +29,7 @@ let stateDirty = false;
 let lastStateWriteAt = 0;
 let sweepTimer;
 let screenerTimer;
+let devBookTimer;
 let pollTimer;
 let solUsdTimer;
 let pollBackoffUntil = 0;
@@ -33,6 +42,9 @@ const screenerStats = {
   rejected: 0,
   entered: 0,
   expired: 0,
+  scored: 0,
+  scoreBlocked: 0,
+  devUnknown: 0,
   tradeSubscriptionsRequested: 0,
   tradeMessagesReceived: 0,
 };
@@ -75,18 +87,34 @@ function screenerNote(level, message, mint = "") {
   }
 }
 
-function candidateStage(candidate) {
-  if (candidate.blockedReason) return candidate.blockedReason;
-  if (config.socialMode !== "off" && socialVerdict(config.socialMode, candidate.social) === "unknown") return "Menunggu data sosial";
-  if (candidate.trades < config.minTrades) return `Trade ${candidate.trades}/${config.minTrades}`;
-  if (candidate.buys < config.minBuys) return `Buy ${candidate.buys}/${config.minBuys}`;
-  if (candidate.buyers.size < config.minUniqueBuyers) return `Buyer unik ${candidate.buyers.size}/${config.minUniqueBuyers}`;
-  if (!candidate.pulledBack) return `Menunggu pullback ${(config.pullbackPct * 100).toFixed(1)}%`;
+// Counts a rejection in the funnel and writes it to the journal (data/journal.jsonl).
+function recordReject(category, mint, detail, extra = {}) {
+  funnel[category] = (funnel[category] ?? 0) + 1;
+  journal.write({ type: "reject", category, mint, symbol: tokenNames.get(mint)?.symbol ?? "", detail, ...extra });
+}
+
+// `key` is a stable id for the gate a candidate is waiting on (used for the funnel);
+// `text` is what the dashboard shows.
+function candidateStageInfo(candidate) {
+  if (candidate.blockedReason) return { key: "blocked", text: candidate.blockedReason };
+  if (config.socialMode !== "off" && socialVerdict(config.socialMode, candidate.social) === "unknown") return { key: "social", text: "Menunggu data sosial" };
+  if (candidate.trades < config.minTrades) return { key: "trades", text: `Trade ${candidate.trades}/${config.minTrades}` };
+  if (candidate.buys < config.minBuys) return { key: "buys", text: `Buy ${candidate.buys}/${config.minBuys}` };
+  if (candidate.buyers.size < config.minUniqueBuyers) return { key: "buyers", text: `Buyer unik ${candidate.buyers.size}/${config.minUniqueBuyers}` };
+  if (!candidate.pulledBack) return { key: "pullback", text: `Menunggu pullback ${(config.pullbackPct * 100).toFixed(1)}%` };
   const rebound = candidate.lowMarketCapUsd > 0
     ? ((candidate.currentMarketCapUsd / candidate.lowMarketCapUsd) - 1) * 100
     : 0;
-  if (rebound < config.bouncePct * 100) return `Menunggu pantulan ${rebound.toFixed(1)}/${(config.bouncePct * 100).toFixed(1)}%`;
-  return "Sinyal entry; cek batas risiko";
+  if (rebound < config.bouncePct * 100) return { key: "rebound", text: `Menunggu pantulan ${rebound.toFixed(1)}/${(config.bouncePct * 100).toFixed(1)}%` };
+  if (config.solanaRpcUrl && candidate.holders?.status !== "ok") {
+    return { key: "holders", text: candidate.holders?.status === "error" ? "Data holder gagal; mencoba lagi" : "Menunggu data holder" };
+  }
+  if (candidate.scoreBlocked) return { key: "score", text: `Skor ${candidate.score.toFixed(2)} < ${config.minScore}` };
+  return { key: "signal", text: "Sinyal entry; cek batas risiko" };
+}
+
+function candidateStage(candidate) {
+  return candidateStageInfo(candidate).text;
 }
 
 function publishScreenerStatus() {
@@ -105,6 +133,7 @@ function publishScreenerStatus() {
     uniqueBuyers: candidate.buyers.size,
     ageSeconds: Math.floor((Date.now() - candidate.createdAt) / 1000),
     stage: candidateStage(candidate),
+    score: candidate.score ?? null,
     lastTradeAt: candidate.lastTradeAt ?? candidate.createdAt,
   }));
   process.send({
@@ -114,6 +143,11 @@ function publishScreenerStatus() {
       rejected: screenerStats.rejected,
       entered: screenerStats.entered,
       expired: screenerStats.expired,
+      scored: screenerStats.scored,
+      scoreBlocked: screenerStats.scoreBlocked,
+      devUnknown: screenerStats.devUnknown,
+      funnel: { ...funnel },
+      holderCheck: Boolean(config.solanaRpcUrl),
       tradeSubscriptionsRequested: screenerStats.tradeSubscriptionsRequested,
       tradeMessagesReceived: screenerStats.tradeMessagesReceived,
       activeCount: candidates.size,
@@ -174,6 +208,8 @@ function rememberTokenMetadata(event) {
     tokenUris.set(mint, event.uri);
     if (tokenUris.size > 80_000) tokenUris.delete(tokenUris.keys().next().value);
   }
+  // The launch event carries the creator wallet; the dev book uses it to remember who launched what.
+  if (typeof event.traderPublicKey === "string" && event.traderPublicKey) devBook.recordLaunch(event.traderPublicKey, mint);
   const existing = tokenNames.get(mint) ?? {};
   const name = typeof event.name === "string" ? event.name.slice(0, 80) : existing.name ?? "";
   const symbol = typeof event.symbol === "string" ? event.symbol.slice(0, 24) : existing.symbol ?? "";
@@ -185,6 +221,7 @@ function onMigration(event) {
   const mint = typeof event.mint === "string" ? event.mint : "";
   if (!mint || state.screenedMigrationMints.includes(mint) || state.positions[mint] || candidates.has(mint)) return;
   screenerStats.scanned += 1;
+  devBook.recordMigration(mint);
 
   const firstPrice = priceFromEvent(event);
   const firstMarketCapUsd = firstPrice !== null && Number.isFinite(solUsdPrice) ? firstPrice * solUsdPrice : null;
@@ -195,14 +232,32 @@ function onMigration(event) {
     screenerStats.rejected += 1;
     rememberScreenedMigration(mint);
     markStateDirty();
+    recordReject("market_cap", mint, `market cap ${formatUsd(firstMarketCapUsd)} outside ${formatUsd(config.minMarketCapUsd)}-${formatUsd(config.maxMarketCapUsd)}`);
     screenerNote("filtered", `Dilewati: market cap ${formatUsd(firstMarketCapUsd)} di luar range ${formatUsd(config.minMarketCapUsd)}–${formatUsd(config.maxMarketCapUsd)}.`, mint);
     publishScreenerStatus();
     return;
   }
+
+  // Dev history is a cheap local lookup, so it runs before anything that costs an API call.
+  const dev = devBook.assess(mint, config);
+  if (dev.verdict === "unknown") screenerStats.devUnknown += 1;
+  const devRejection = devReason(dev);
+  if (devRejection) {
+    screenerStats.rejected += 1;
+    rememberScreenedMigration(mint);
+    markStateDirty();
+    recordReject("dev_history", mint, devRejection, { launches: dev.launches, migrated: dev.migrated, rugs: dev.rugs });
+    log(`[skip] ${displayName(mint)} rejected: ${devRejection}.`);
+    screenerNote("filtered", `Ditolak: riwayat dev buruk (${devRejection}).`, mint);
+    publishScreenerStatus();
+    return;
+  }
+
   if (candidates.size >= config.maxActiveCandidates) {
     screenerStats.rejected += 1;
     rememberScreenedMigration(mint);
     markStateDirty();
+    recordReject("capacity", mint, `active candidate limit ${config.maxActiveCandidates} reached`);
     log(`[skip] migrated token ${mint} skipped; active candidate limit (${config.maxActiveCandidates}) reached.`);
     screenerNote("filtered", `Dilewati: kapasitas screening ${config.maxActiveCandidates} kandidat penuh.`, mint);
     publishScreenerStatus();
@@ -224,6 +279,12 @@ function onMigration(event) {
     peakMarketCapUsd: firstMarketCapUsd,
     lowMarketCapUsd: firstMarketCapUsd,
     pulledBack: false,
+    liquidityUsd: null,
+    holders: null,
+    score: null,
+    scoreBlocked: false,
+    scoreCounted: false,
+    scoreBlockedCounted: false,
     social: null,
     socialTried: false,
     pool: String(event.pool ?? event.poolAddress ?? event.newPool ?? event.new_pool ?? ""),
@@ -270,6 +331,16 @@ function closePaperPosition(mint, price, marketCapUsd, reason) {
   delete state.positions[mint];
   persistState();
   const exitCap = Number.isFinite(marketCapUsd) ? formatUsd(marketCapUsd) : formatUsd(position.lastMarketCapUsd);
+  journal.write({
+    type: "exit",
+    mint,
+    symbol: position.symbol,
+    reason,
+    pnlSol: Number(pnlSol.toFixed(6)),
+    heldSeconds: Math.round((Date.now() - position.openedAt) / 1000),
+    entryMarketCapUsd: position.entryMarketCapUsd ?? null,
+    exitMarketCapUsd: Number.isFinite(marketCapUsd) ? marketCapUsd : position.lastMarketCapUsd ?? null,
+  });
   log(`[exit:${reason}] ${displayName(mint)} MC=${exitCap} pnl=${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL | balance=${state.balanceSol.toFixed(5)} SOL`);
   screenerNote("exit", `Paper exit ${reason} pada market cap ${exitCap}; estimasi PnL ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL.`, mint);
   unsubscribeMint(mint);
@@ -318,7 +389,18 @@ function openPaperPosition(candidate, price, marketCapUsd) {
   state.positions[candidate.mint] = position;
   candidates.delete(candidate.mint);
   persistState();
-  log(`[paper-buy] ${displayName(candidate.mint)} MC=${formatUsd(marketCapUsd)} spend=${config.buyAmountSol.toFixed(5)} SOL | activity=${candidate.trades} trades/${candidate.buyers.size} buyers`);
+  journal.write({
+    type: "entry",
+    mint: candidate.mint,
+    symbol: info.symbol ?? "",
+    marketCapUsd,
+    trades: candidate.trades,
+    buys: candidate.buys,
+    buyers: candidate.buyers.size,
+    liquidityUsd: candidate.liquidityUsd,
+    ...candidate.entryAnalysis,
+  });
+  log(`[paper-buy] ${displayName(candidate.mint)} MC=${formatUsd(marketCapUsd)} spend=${config.buyAmountSol.toFixed(5)} SOL | activity=${candidate.trades} trades/${candidate.buyers.size} buyers${Number.isFinite(candidate.score) ? ` | score=${candidate.score.toFixed(2)}` : ""}`);
   screenerStats.entered += 1;
   screenerNote("entry", `Sinyal terpenuhi; paper entry ${candidate.symbol || candidate.mint} pada market cap ${formatUsd(marketCapUsd)}.`, candidate.mint);
   publishScreenerStatus();
@@ -337,6 +419,109 @@ function onTokenTrade(event) {
   });
 }
 
+function expireCandidate(mint, candidate) {
+  candidates.delete(mint);
+  screenerStats.expired += 1;
+  if (!state.positions[mint]) unsubscribeMint(mint);
+  const stage = candidateStageInfo(candidate);
+  recordReject(`expired:${stage.key}`, mint, stage.text, { peakMarketCapUsd: candidate.peakMarketCapUsd, marketCapUsd: candidate.currentMarketCapUsd });
+  log(`[expire] ${displayName(mint)} did not meet entry criteria in time.`);
+  screenerNote("expired", `Waktu screening habis; tahap terakhir: ${stage.text}.`, mint);
+}
+
+function rejectCandidate(candidate, category, detail, message) {
+  candidates.delete(candidate.mint);
+  screenerStats.rejected += 1;
+  unsubscribeMint(candidate.mint);
+  recordReject(category, candidate.mint, detail);
+  log(`[skip] ${displayName(candidate.mint)} rejected: ${detail}.`);
+  screenerNote("filtered", message ?? `Ditolak: ${detail}.`, candidate.mint);
+  publishScreenerStatus();
+}
+
+// A token that collapses by RUG_DROP_PCT from its observed peak while being screened counts
+// as a rug against its creator (once per token).
+function noteRugIfCollapsed(candidate) {
+  if (!(candidate.peakMarketCapUsd > 0) || !Number.isFinite(candidate.currentMarketCapUsd)) return;
+  if (candidate.currentMarketCapUsd <= candidate.peakMarketCapUsd * (1 - config.rugDropPct) && devBook.recordRug(candidate.mint)) {
+    journal.write({ type: "rug", mint: candidate.mint, peakMarketCapUsd: candidate.peakMarketCapUsd, marketCapUsd: candidate.currentMarketCapUsd });
+  }
+}
+
+function requestHolders(candidate) {
+  const holders = candidate.holders;
+  if (holders?.status === "pending") return;
+  if (holders?.status === "error" && Date.now() < holders.retryAt) return;
+  candidate.holders = { status: "pending" };
+  fetchHolderStats(candidate.mint, config.solanaRpcUrl, {
+    topCount: config.topHoldersCount,
+    skipLargest: config.topHoldersSkipLargest,
+  })
+    .then((stats) => {
+      candidate.holders = { status: "ok", ...stats };
+      journal.write({ type: "holders", mint: candidate.mint, ...stats });
+    })
+    .catch((error) => {
+      candidate.holders = { status: "error", retryAt: Date.now() + (error.rateLimited ? 30_000 : 10_000) };
+      pollLog(`[holders] check failed for ${candidate.mint.slice(0, 6)}..: ${error.message}`);
+    });
+}
+
+// Gates that run only once a candidate already has an entry signal, cheapest first, so paid or
+// rate-limited lookups (holders RPC) are never spent on tokens that would not be bought anyway.
+// Returns true when the candidate may be bought now.
+function passesEntryPipeline(candidate) {
+  const dev = devBook.assess(candidate.mint, config);
+  const devRejection = devReason(dev);
+  if (devRejection) {
+    rejectCandidate(candidate, "dev_history", devRejection, `Ditolak: riwayat dev buruk (${devRejection}).`);
+    return false;
+  }
+
+  const liquidityRejection = liquidityReason(candidate, config);
+  if (liquidityRejection) {
+    rejectCandidate(candidate, "liquidity", liquidityRejection, `Ditolak: likuiditas terlalu kecil (${liquidityRejection}).`);
+    return false;
+  }
+
+  if (config.solanaRpcUrl) {
+    if (candidate.holders?.status !== "ok") {
+      requestHolders(candidate); // result is picked up on a later update
+      return false;
+    }
+    const holderRejection = holderReason(candidate.holders, config);
+    if (holderRejection) {
+      rejectCandidate(candidate, "holders", holderRejection, `Ditolak: holder terlalu terkonsentrasi (${holderRejection}).`);
+      return false;
+    }
+  }
+
+  const { score, parts } = scoreCandidate(candidate, config, { dev, holders: candidate.holders });
+  candidate.score = score;
+  if (!candidate.scoreCounted) {
+    candidate.scoreCounted = true;
+    screenerStats.scored += 1;
+  }
+  if (score < config.minScore) {
+    candidate.scoreBlocked = true;
+    if (!candidate.scoreBlockedCounted) {
+      candidate.scoreBlockedCounted = true;
+      screenerStats.scoreBlocked += 1;
+      journal.write({ type: "score_block", mint: candidate.mint, symbol: candidate.symbol, score, minScore: config.minScore, parts });
+      screenerNote("blocked", `Skor ${score.toFixed(2)} di bawah batas ${config.minScore}; kandidat tetap dipantau.`, candidate.mint);
+    }
+    return false;
+  }
+  candidate.scoreBlocked = false;
+  candidate.entryAnalysis = {
+    score,
+    parts,
+    dev: dev.verdict,
+    topHoldersPct: candidate.holders?.status === "ok" ? candidate.holders.topPct : null,
+  };
+  return true;
+}
+
 // Shared by both data sources. activity.kind === "trade"    -> one PumpPortal trade event
 //                               activity.kind === "snapshot" -> polled DexScreener totals
 function applyUpdate(mint, price, marketCapUsd, now, activity) {
@@ -347,11 +532,7 @@ function applyUpdate(mint, price, marketCapUsd, now, activity) {
     if (Number.isFinite(marketCapUsd)) candidate.currentMarketCapUsd = marketCapUsd;
     if (activity.kind === "trade") candidate.lastTradeAt = now;
     if (now - candidate.createdAt > config.maxCandidateAgeSeconds * 1000) {
-      candidates.delete(mint);
-      screenerStats.expired += 1;
-      if (!state.positions[mint]) unsubscribeMint(mint);
-      log(`[expire] ${displayName(mint)} did not meet entry criteria in time.`);
-      screenerNote("expired", `Waktu screening habis; tahap terakhir: ${candidateStage(candidate)}.`, mint);
+      expireCandidate(mint, candidate);
     } else {
       if (activity.kind === "trade") {
         candidate.trades += 1;
@@ -365,19 +546,8 @@ function applyUpdate(mint, price, marketCapUsd, now, activity) {
         candidate.buys = Math.max(candidate.buys, activity.buys);
       }
       if (Number.isFinite(candidate.currentMarketCapUsd)) {
-        if (candidate.peakMarketCapUsd === null || candidate.currentMarketCapUsd > candidate.peakMarketCapUsd) {
-          candidate.peakMarketCapUsd = candidate.currentMarketCapUsd;
-        }
-        if (candidate.lowMarketCapUsd === null || candidate.currentMarketCapUsd < candidate.lowMarketCapUsd) {
-          candidate.lowMarketCapUsd = candidate.currentMarketCapUsd;
-        }
-        if (candidate.peakMarketCapUsd > 0
-          && candidate.currentMarketCapUsd <= candidate.peakMarketCapUsd * (1 - config.pullbackPct)) {
-          candidate.pulledBack = true;
-        }
-        if (candidate.pulledBack && candidate.currentMarketCapUsd < candidate.lowMarketCapUsd) {
-          candidate.lowMarketCapUsd = candidate.currentMarketCapUsd;
-        }
+        updateLevels(candidate, candidate.currentMarketCapUsd, config);
+        noteRugIfCollapsed(candidate);
       }
 
       if (!candidate.initialMarketCapChecked && Number.isFinite(candidate.currentMarketCapUsd)) {
@@ -387,11 +557,12 @@ function applyUpdate(mint, price, marketCapUsd, now, activity) {
           candidates.delete(mint);
           screenerStats.rejected += 1;
           unsubscribeMint(mint);
+          recordReject("market_cap", mint, `market cap ${formatUsd(initialCap)} outside ${formatUsd(config.minMarketCapUsd)}-${formatUsd(config.maxMarketCapUsd)}`);
           screenerNote("filtered", `Dilewati: market cap ${formatUsd(initialCap)} di luar range ${formatUsd(config.minMarketCapUsd)}–${formatUsd(config.maxMarketCapUsd)}.`, mint);
           publishScreenerStatus();
         }
       }
-      if (candidates.has(mint) && shouldEnter(candidate, candidate.currentMarketCapUsd, config) && socialAllows(candidate)) {
+      if (candidates.has(mint) && shouldEnter(candidate, candidate.currentMarketCapUsd, config) && socialAllows(candidate) && passesEntryPipeline(candidate)) {
         openPaperPosition(candidate, price, candidate.currentMarketCapUsd);
       }
     }
@@ -415,10 +586,16 @@ async function resolveSocial(candidate) {
   const uri = tokenUris.get(candidate.mint);
   if (!uri) return; // launch not seen by this bot; DexScreener info may still fill it in later
   try {
-    const meta = await fetchTokenMetadata(uri);
+    const meta = await fetchTokenMetadata(uri, fetch, config.metadataHosts);
     candidate.social = mergeSocials(candidate.social, parseSocials(meta) ?? { twitter: "", telegram: "", website: "" });
     publishScreenerStatus();
   } catch (error) {
+    if (error.permanent) {
+      // e.g. host not on the allowlist: retrying cannot help. Leave the social data unknown;
+      // in free mode DexScreener may still fill it in.
+      pollLog(`[social] metadata skipped for ${candidate.mint.slice(0, 6)}..: ${error.message}`);
+      return;
+    }
     candidate.socialTried = false; // allow a retry on a later poll
     candidate.socialRetryAt = Date.now() + 10_000;
     pollLog(`[social] metadata fetch failed for ${candidate.mint.slice(0, 6)}..: ${error.message}`);
@@ -431,15 +608,10 @@ function socialAllows(candidate) {
   const verdict = socialVerdict(config.socialMode, candidate.social);
   if (verdict === "pass") return true;
   if (verdict === "fail") {
-    candidates.delete(candidate.mint);
-    screenerStats.rejected += 1;
-    unsubscribeMint(candidate.mint);
     const requirement = config.socialMode === "twitter"
       ? "tautan X/Twitter"
       : config.socialMode === "multiple" ? "minimal dua jenis tautan sosial" : "minimal satu tautan sosial";
-    log(`[skip] ${displayName(candidate.mint)} rejected: missing ${requirement} in token metadata.`);
-    screenerNote("filtered", `Ditolak: perlu ${requirement} di metadata token.`, candidate.mint);
-    publishScreenerStatus();
+    rejectCandidate(candidate, "social", `missing ${requirement} in token metadata`, `Ditolak: perlu ${requirement} di metadata token.`);
   } else if (!candidate.socialTried && Date.now() >= (candidate.socialRetryAt ?? 0)) {
     resolveSocial(candidate);
   }
@@ -462,6 +634,7 @@ function handleSnapshot(mint, snap) {
   if (candidate) {
     if (snap.pool) candidate.pool = snap.pool;
     if (snap.socials) candidate.social = mergeSocials(candidate.social, snap.socials);
+    if (snap.liquidityUsd > 0) candidate.liquidityUsd = snap.liquidityUsd; // 0 means "not reported"
     if (snap.trades > candidate.trades) screenerStats.tradeMessagesReceived += snap.trades - candidate.trades;
     if (!polledMints.has(mint)) {
       polledMints.add(mint);
@@ -604,13 +777,7 @@ function connect() {
 function sweep() {
   const now = Date.now();
   for (const [mint, candidate] of candidates) {
-    if (now - candidate.createdAt > config.maxCandidateAgeSeconds * 1000) {
-      candidates.delete(mint);
-      screenerStats.expired += 1;
-      if (!state.positions[mint]) unsubscribeMint(mint);
-      log(`[expire] ${displayName(mint)} did not meet entry criteria in time.`);
-      screenerNote("expired", `Waktu screening habis; tahap terakhir: ${candidateStage(candidate)}.`, mint);
-    }
+    if (now - candidate.createdAt > config.maxCandidateAgeSeconds * 1000) expireCandidate(mint, candidate);
   }
   for (const [mint, position] of Object.entries(state.positions)) {
     if (!Number.isFinite(position.lastPriceAt) || now - position.lastPriceAt > 30_000) {
@@ -633,9 +800,12 @@ function shutdown() {
   clearTimeout(reconnectTimer);
   clearInterval(sweepTimer);
   clearInterval(screenerTimer);
+  clearInterval(devBookTimer);
   clearTimeout(pollTimer);
   clearTimeout(solUsdTimer);
   persistState();
+  devBook.save();
+  journal.stop();
   socket?.close();
   log("[shutdown] Paper state saved.");
   if (process.connected) process.disconnect();
@@ -665,7 +835,10 @@ process.on("message", (message) => {
 
 log(`[start] mode=${config.mode} balance=${state.balanceSol.toFixed(5)} SOL buy=${config.buyAmountSol} SOL MC=${formatUsd(config.minMarketCapUsd)}–${formatUsd(config.maxMarketCapUsd)} TP=${(config.takeProfitPct * 100).toFixed(1)}% SL=${(config.stopLossPct * 100).toFixed(1)}%`);
 log(`[strategy] pullback=${(config.pullbackPct * 100).toFixed(1)}% bounce=${(config.bouncePct * 100).toFixed(1)}% | paper fills include ${config.paperFeeBps} bps fee and ${config.paperSlippageBps} bps slippage per side.`);
+log(`[pipeline] dev filter (max ${config.maxDevRugs} rug / ${config.maxDevLaunches} launches) > liquidity >= $${config.minLiquidityUsd} > holders ${config.solanaRpcUrl ? `top ${config.topHoldersCount} <= ${config.maxTopHoldersPct}%` : "(off: no SOLANA_RPC_URL)"} > score >= ${config.minScore} | journal: data/journal.jsonl`);
 if (state.daily?.day !== currentUtcDay()) resetDailyCountersIfNeeded();
+journal.start();
+devBookTimer = setInterval(() => devBook.save(), 60_000);
 connect();
 startPolling();
 sweepTimer = setInterval(sweep, 2000);

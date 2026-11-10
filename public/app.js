@@ -472,6 +472,7 @@ function renderScreener(status = {}, debug = [], runtime = {}, logs = []) {
   $("#screenRejected").textContent = String(status.rejected ?? 0);
   $("#screenEntered").textContent = String(status.entered ?? 0);
   $("#screenExpired").textContent = String(status.expired ?? 0);
+  if (typeof renderFunnel === "function") renderFunnel(status);
 
   const body = $("#screenerBody");
   body.replaceChildren();
