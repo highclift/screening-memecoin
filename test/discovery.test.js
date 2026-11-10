@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SOL_MINT, isMemecoinPool, createBudget, fetchGeckoPools, fetchGeckoPoolsMulti, parseGeckoPool } from "../src/discovery.js";
+import { SOL_MINT, DISCOVERY_JOBS, DISCOVERY_PAGE_COUNT, buildRotation, isMemecoinPool, createBudget, fetchGeckoPools, fetchGeckoPoolsMulti, parseGeckoPool } from "../src/discovery.js";
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -93,6 +93,47 @@ test("isMemecoinPool: anything that is not a memecoin against SOL is skipped", (
   assert.equal(isMemecoinPool(parseGeckoPool(row({ mint: USDC }), NOW)), false, "stablecoin base");
   assert.equal(isMemecoinPool({ mint: "", pool: "" }), false);
   assert.equal(isMemecoinPool(null), false);
+});
+
+test("the page rotation visits the pages that matter far more often than the deep ones", () => {
+  // The call rate is low, so an even cycle would reach page 1 of trending — where a coin waking up
+  // shows first — as rarely as page 9 of the volume ranking.
+  const visits = new Map();
+  for (const job of DISCOVERY_JOBS) {
+    const key = `${job.kind}${job.page}`;
+    visits.set(key, (visits.get(key) ?? 0) + 1);
+  }
+  assert.equal(new Set(visits.keys()).size, DISCOVERY_PAGE_COUNT, "every page is still covered");
+  assert.ok(visits.get("new1") >= 4, `new page 1 is visited ${visits.get("new1")} times per cycle`);
+  assert.ok(visits.get("trending1") >= 4);
+  assert.ok(visits.get("top1") >= 3);
+  assert.equal(visits.get("top9"), 1, "the deep pages come round once");
+  assert.equal(visits.get("top10"), 1);
+
+  // A custom rotation interleaves the same way.
+  const rotation = buildRotation([{ kind: "new", page: 1 }], [{ kind: "top", page: 1 }, { kind: "top", page: 2 }]);
+  assert.deepEqual(rotation.map((job) => `${job.kind}${job.page}`), ["new1", "top1", "new1", "top2"]);
+});
+
+test("createBudget paces calls evenly, which is what keeps GeckoTerminal from 429ing us", () => {
+  // The limit is not only per minute: spending a whole minute's allowance in the first fifteen
+  // seconds is a burst, and a burst comes back as 429 however legal the average was.
+  let t = 0;
+  const budget = createBudget(20, () => t, { minIntervalMs: 3000 });
+
+  assert.equal(budget.tryTake(), true);
+  t = 2999;
+  assert.equal(budget.ready(), false, "too soon after the last call");
+  assert.equal(budget.tryTake(), false);
+  t = 3000;
+  assert.equal(budget.ready(), true);
+  assert.equal(budget.tryTake(), true);
+
+  // Over a minute of ticking it never exceeds the per-minute cap either.
+  let taken = 2;
+  for (t = 3001; t <= 63_000; t += 100) if (budget.tryTake()) taken += 1;
+  assert.ok(taken <= 21, `took ${taken} calls in a minute`);
+  assert.ok(taken >= 18, `only took ${taken} calls — the pacing is leaving the budget unused`);
 });
 
 test("createBudget enforces calls per minute with a sliding window", () => {

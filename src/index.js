@@ -1,4 +1,5 @@
 import "dotenv/config";
+import fs from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.js";
 import { createUniverse } from "./universe.js";
@@ -107,6 +108,26 @@ const screener = createScreener({
   },
 });
 
+// The fourth row on the dashboard: everything the three bots write down. One line per journal
+// plus the paper account, so a disk that fills up or a write that fails is visible rather than
+// silent.
+function storageStatus() {
+  const files = Object.entries(journals).map(([name, journal]) => ({ name, ...journal.stats() }));
+  let accountBytes = 0;
+  try {
+    accountBytes = fs.statSync(path.resolve("data", "paper-state.json")).size;
+  } catch {
+    // no account file yet
+  }
+  return {
+    lines: files.reduce((total, file) => total + file.lines, 0),
+    bytes: files.reduce((total, file) => total + file.bytes, 0) + accountBytes,
+    pending: files.reduce((total, file) => total + file.pending, 0),
+    lastError: files.find((file) => file.lastError)?.lastError ?? "",
+    files: files.map(({ name, lines, bytes }) => ({ name, lines, bytes })),
+  };
+}
+
 function publishStatus() {
   if (!process.send) return;
   process.send({
@@ -116,6 +137,7 @@ function publishStatus() {
         screener: screener.status(),
         filter: filter.status(),
         executor: executor.status(),
+        storage: storageStatus(),
       },
       holderCheck: Boolean(config.solanaRpcUrl),
       updatedAt: new Date().toISOString(),

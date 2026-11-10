@@ -1,4 +1,6 @@
 node_modules/
+# .env holds the real keys and must never be committed. .env.example is the template and IS
+# committed, so it must never contain a real key.
 .env
 data/
 .halt

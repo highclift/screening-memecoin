@@ -167,6 +167,38 @@ test("journal: buffers, appends JSONL, and rotates past maxBytes", () => {
   journal.stop();
 });
 
+test("journal: reports what it has written, for the dashboard's storage row", () => {
+  const filePath = path.join(tmp(), "journal.jsonl");
+  const journal = createJournal({ filePath });
+  assert.deepEqual(journal.stats(), { filePath, lines: 0, bytes: 0, pending: 0, lastError: "" });
+
+  journal.write({ type: "new", mint: "m1" });
+  journal.write({ type: "new", mint: "m2" });
+  let stats = journal.stats();
+  assert.equal(stats.lines, 2);
+  assert.equal(stats.pending, 2, "still buffered");
+  assert.equal(stats.bytes, 0, "nothing on disk until it flushes");
+
+  journal.flush();
+  stats = journal.stats();
+  assert.equal(stats.pending, 0);
+  assert.ok(stats.bytes > 0, "now it is on disk");
+  assert.equal(stats.lastError, "");
+  journal.stop();
+});
+
+test("journal: a failed write is reported rather than swallowed", () => {
+  // A directory where the file should be: writing can never succeed.
+  const dir = tmp();
+  const filePath = path.join(dir, "blocked.jsonl");
+  fs.mkdirSync(filePath);
+  const journal = createJournal({ filePath, onError: () => {} });
+  journal.write({ type: "new" });
+  journal.flush();
+  assert.ok(journal.stats().lastError, "the storage row can show that writing failed");
+  journal.stop();
+});
+
 test("meter: counts only the last minute", () => {
   const meter = createMeter();
   const start = 1_000_000;

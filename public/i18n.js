@@ -11,6 +11,9 @@ const LANG_SUPPORTED = ["id", "en"];
 const I18N = {
   id: {
     "lang.switchLabel": "Bahasa",
+    "theme.switchLabel": "Tampilan",
+    "theme.dark": "Gelap",
+    "theme.light": "Terang",
     "lang.id": "Indonesia",
     "lang.en": "English",
 
@@ -18,7 +21,7 @@ const I18N = {
     "nav.overview": "Ringkasan",
     "nav.bots": "Bot",
     "nav.strategy": "Strategi",
-    "nav.activity": "Aktivitas",
+    "nav.watchlist": "Daftar hijau",
     "side.caption": "TERMINAL PAPER",
     "side.paperChip": "MODE LATIHAN",
     "side.paperNote": "Hanya simulasi.<br />Tidak ada transaksi on-chain.",
@@ -53,8 +56,6 @@ const I18N = {
     "runtime.detail.noKey": "API key tidak wajib di mode gratis; tekan Mulai.",
 
     // ---------- "what is happening" headline ----------
-    "now.eyebrow": "SEDANG TERJADI",
-    "now.title": "Apa yang bot lakukan sekarang",
     "now.stopped": "Bot belum berjalan. Tekan “Mulai paper scanner” di bawah dan halaman ini akan menjelaskan setiap langkahnya.",
     "now.starting": "Bot sedang dinyalakan. Sebentar lagi mulai mencari koin.",
     "now.stopping": "Bot sedang dimatikan.",
@@ -85,6 +86,9 @@ const I18N = {
 
     "ev.start": "Bot dijalankan dengan saldo latihan {balance} dan {buy} per pembelian.",
     "ev.pipeline": "Rantai tiga bot siap: screening semua koin, lalu saringan, lalu eksekusi.",
+    "ev.geckoPaused": "Sumber daftar koin membatasi laju; bot 1 jeda {seconds} detik lalu lanjut pelan-pelan di {rate} panggilan/menit. Harga dan koin yang sudah dipantau tetap jalan.",
+    "ev.geckoRecovered": "Sumber daftar koin sudah normal lagi; bot 1 kembali ke kecepatan penuh ({rate} panggilan/menit).",
+    "ev.geckoPageFailed": "Satu halaman daftar koin (halaman {page}) gagal diambil; bot 1 lanjut ke halaman berikutnya. ({detail})",
     "ev.feedConnected": "Tersambung ke PumpPortal: koin yang baru lahir dan yang pindah ke pool AMM langsung masuk.",
     "ev.feedDisconnected": "Sambungan data terputus. Mencoba menyambung lagi dalam {seconds} detik.",
     "ev.feedError": "Sumber data menolak permintaan: {detail}",
@@ -233,62 +237,18 @@ const I18N = {
     "help.funnel": "Daftar ini menghitung alasan bot 2 menolak koin. Kalau satu alasan mendominasi, saringan itu yang paling layak diperiksa.",
 
     // ---------- the three bots ----------
-    "bots.eyebrow": "RANTAI TIGA BOT",
-    "bots.title": "Bot dan tugasnya",
-    "bots.note": "Bot 1 → bot 2 → bot 3",
-    "bot.on": "JALAN",
-    "bot.off": "BERHENTI",
-    "bot.now.off": "Belum berjalan.",
-    "bot.now.notStarted": "Menunggu laporan pertama dari bot.",
-    "bot.screener.name": "Bot 1 · Screening",
-    "bot.screener.stage": "semua koin, umur berapa pun",
     "bot.screener.badge": "BOT 1",
     "bot.screener.task": "Melihat setiap koin yang bisa ditemukan — yang baru lahir maupun yang dibuat sebulan lalu — dan mencatat semuanya. Bot ini tidak menilai apa pun.",
-    "bot.screener.detailsToggle": "Koin terakhir yang di-screening",
-    "bot.screener.listEmpty": "Belum ada koin yang di-screening.",
-    "bot.screener.listRow": "umur {age} · {marketCap}",
-    "bot.screener.now.waiting": "Mulai menyapu halaman pool; koin pertama segera masuk.",
-    "bot.screener.now.working": "{perMinute} pemeriksaan per menit, {newPerMinute} koin baru per menit; {coins} koin berbeda sejauh ini.",
-    "bot.filter.name": "Bot 2 · Saringan",
-    "bot.filter.stage": "bisa pump atau pump lagi?",
     "bot.filter.badge": "BOT 2",
     "bot.filter.task": "Menilai ulang semua koin dari bot 1, terus-menerus. Koin lama yang sepi berbulan-bulan bisa jadi hijau pada jam volumenya bangun.",
-    "bot.filter.detailsToggle": "Koin yang baru jadi hijau",
-    "bot.filter.listEmpty": "Belum ada koin yang lolos.",
-    "bot.filter.listRow": "skor {score} · {reason} · umur {age}",
-    "bot.filter.now.waiting": "Menunggu koin pertama dari bot 1.",
-    "bot.filter.now.green": "{coins} dinilai berpotensi pump dan diserahkan ke bot 3.",
-    "bot.filter.now.none": "Sudah menilai {judged} koin; belum ada yang cukup kuat.",
-    "bot.executor.name": "Bot 3 · Eksekusi",
-    "bot.executor.stage": "kapan masuk, kapan keluar",
     "bot.executor.badge": "BOT 3",
     "bot.executor.task": "Mengukur sendiri ayunan harga tiap koin hijau, lalu menentukan jarak stop, trailing, dan momen masuknya. Tidak ada angka strategi yang perlu diatur.",
-    "bot.executor.detailsToggle": "Yang sedang ditunggu",
-    "bot.executor.listEmpty": "Belum ada koin yang dipantau.",
-    "bot.executor.now.idle": "Menunggu koin hijau dari bot 2.",
-    "bot.executor.now.watching": "Memantau {coins} dan menunggu momen masuk.",
-    "bot.executor.now.holding": "Sedang memegang {positions}.",
-    "bot.executor.now.blocked": "Entry tertahan: {reason}.",
-    "bot.stat.coins": "Koin di-screening",
-    "bot.stat.perMinute": "Pemeriksaan per menit",
-    "bot.stat.newPerMinute": "Koin baru per menit",
-    "bot.stat.universe": "Koin dalam pantauan",
-    "bot.stat.launches": "Koin baru / migrasi",
-    "bot.stat.judged": "Penilaian dibuat",
-    "bot.stat.green": "Hijau sekarang / total",
-    "bot.stat.red": "Ditolak",
-    "bot.stat.topReason": "Alasan terbanyak",
-    "bot.stat.balance": "Saldo latihan",
-    "bot.stat.pnl": "Untung/rugi",
-    "bot.stat.open": "Posisi terbuka",
-    "bot.stat.record": "Menang / kalah",
-    "bot.stat.watching": "Dipantau",
-    "bot.stat.entriesToday": "Beli hari ini",
     "bot3.holding": "Sedang dipegang",
     "bot3.notWatching": "Belum dipantau",
     // ---------- what bot 3 is waiting for ----------
     "waiting.measure": "Mengukur ayunan harga koin ini",
     "waiting.dip": "Menunggu harga turun {dip}% dari puncak",
+    "waiting.high": "Menunggu harga menembus puncak baru",
     "waiting.bounce": "Menunggu pantulan {bounce}% dari titik rendah",
     "waiting.buyers": "Menunggu pembeli kembali mendominasi",
     "waiting.spike": "Lonjakan terlalu tajam; menunggu harga tenang",
@@ -328,18 +288,22 @@ const I18N = {
     "now.green": "Bot 2 menandai {coins} berpotensi pump; bot 1 terus men-screening {perMinute} koin per menit.",
     "now.screening": "Bot 1 sudah men-screening {coins} ({perMinute} per menit); bot 2 belum menemukan yang cukup kuat.",
     "exit.trail": "trailing stop",
+    "exit.break-even": "balik modal (untung dijaga)",
+    "exit.max-hold-total": "batas waktu maksimum",
     "exit.trail-locked": "trailing stop (untung dijaga)",
     "exit.stall": "berhenti naik",
     "exit.breakdown": "penjual mengambil alih",
     "ev.shutdown": "Ketiga bot berhenti; akun latihan disimpan.",
     "ev.greenScore": "Bot 2 menandai koin hijau mulai skor {score}.",
-    "ev.bot1.started": "Bot 1 mulai men-screening: {pages} halaman pool bergilir tiap {seconds} detik, plus {batch} koin disegarkan tiap {refresh} detik.",
+    "ev.bot1.started": "Bot 1 mulai men-screening: {pages} halaman pool bergilir pada {rate} panggilan/menit, dan semua koin yang sudah dikenal dicek ulang {recheck} koin/menit.",
     "ev.bot1.error": "Bot 1 gagal mengambil data: {detail}",
     "ev.bot2.green": "Bot 2: {token} berpotensi pump (skor {score}, {reason}), umur {age}.",
     "ev.bot2.greenSurge": "Bot 2: {token} berpotensi pump (skor {score}) — volume {times}× jam biasanya, umur {age}.",
     "ev.bot2.ungreen": "Bot 2 menarik status hijau {token}: {reason}",
     "ev.bot3.buy": "Bot 3 beli {token} di {mc} setelah turun {dip}% lalu memantul {bounce}%. Stop {stop}%, trailing {trail}% (koin ini bergerak ~{vol}% per menit).",
     "ev.exit.trail": "Bot 3 jual {token} kena trailing stop: {pnl}",
+    "ev.exit.breakEven": "Bot 3 jual {token} di titik balik modal; untung yang sudah ada dijaga: {pnl}",
+    "ev.exit.maxHoldTotal": "Bot 3 jual {token} karena sudah mencapai batas waktu maksimum: {pnl}",
     "ev.exit.trailLocked": "Bot 3 jual {token} untuk menjaga untung: {pnl}",
     "ev.exit.stall": "Bot 3 jual {token} karena berhenti naik: {pnl}",
     "ev.exit.breakdown": "Bot 3 jual {token} karena penjual mengambil alih: {pnl}",
@@ -349,22 +313,37 @@ const I18N = {
     "form.moneyTitle": "Batas uang",
     "form.decideTitle": "Yang diputuskan bot sendiri",
     "form.decideNote": "Bot 2 menilai koin mana yang berpotensi pump; bot 3 mengukur ayunan harga tiap koin lalu menentukan sendiri kapan masuk, stop, dan jual. Tidak ada angka strategi untuk diatur di sini.",
-    "help.chain": "Tiga bot berurutan, bukan tiga bot terpisah: bot 1 men-screening semua koin, bot 2 menyaring hasilnya, bot 3 mengeksekusi koin yang lolos. Satu akun latihan untuk ketiganya.",
-    "help.perMinute": "Berapa kali bot 1 memeriksa sebuah koin dalam satu menit terakhir, termasuk koin yang dilihat berulang. Ratusan per menit itu normal.",
-    "help.green": "Hijau berarti bot 2 menilai koin itu berpotensi pump sekarang. Status ini dinilai ulang terus, jadi bisa dicabut lagi.",
-    "help.record": "Jumlah transaksi latihan yang ditutup untung berbanding rugi.",
-    "help.watching": "Koin hijau yang sedang diamati bot 3 sambil menunggu momen masuk.",
+
+    "log.title": "Log",
+    "bot.screener.name": "bot screening",
+    "bot.filter.name": "bot saringan",
+    "bot.executor.name": "bot eksekusi",
+    "bot.storage.name": "bot database",
+    "bot.storage.task": "Menyimpan semua yang dilakukan ketiga bot: tiga file log dan akun latihan di folder data/.",
+    "bot.screener.stat": "{coins} koin · {perMinute}/menit",
+    "bot.filter.stat": "{green} hijau dari {judged} dinilai",
+    "bot.executor.stat": "{open} posisi · {pnl} SOL",
+    "bot.storage.stat": "{lines} baris · {size}",
+    "bot.state.running": "jalan",
+    "bot.state.idle": "siaga",
+    "bot.state.trading": "pegang posisi",
+    "bot.state.blocked": "tertahan",
+    "bot.state.starting": "mulai…",
+    "bot.state.stopped": "berhenti",
   },
 
   en: {
     "lang.switchLabel": "Language",
+    "theme.switchLabel": "Appearance",
+    "theme.dark": "Dark",
+    "theme.light": "Light",
     "lang.id": "Indonesia",
     "lang.en": "English",
 
     "nav.overview": "Overview",
     "nav.bots": "Bots",
     "nav.strategy": "Strategy",
-    "nav.activity": "Activity",
+    "nav.watchlist": "Green list",
     "side.caption": "PAPER TERMINAL",
     "side.paperChip": "PRACTICE MODE",
     "side.paperNote": "Simulation only.<br />No on-chain transactions.",
@@ -398,8 +377,6 @@ const I18N = {
     "runtime.detail.hasKey": "API key found; press Start.",
     "runtime.detail.noKey": "An API key is optional in free mode; press Start.",
 
-    "now.eyebrow": "HAPPENING NOW",
-    "now.title": "What the bots are doing right now",
     "now.stopped": "The bots are not running yet. Press “Start paper scanner” below and this page will narrate every step.",
     "now.starting": "The bots are starting up. They will begin looking for coins in a moment.",
     "now.stopping": "The bots are shutting down.",
@@ -430,6 +407,9 @@ const I18N = {
 
     "ev.start": "The bots started with a {balance} practice balance and {buy} per buy.",
     "ev.pipeline": "The three-bot chain is up: screen every coin, then filter, then execute.",
+    "ev.geckoPaused": "The coin-listing source is rate limiting us; bot 1 waits {seconds}s and then carries on more slowly, at {rate} calls/min. Prices and the coins already being watched are unaffected.",
+    "ev.geckoRecovered": "The coin-listing source is happy again; bot 1 is back to full speed ({rate} calls/min).",
+    "ev.geckoPageFailed": "One listing page (page {page}) could not be fetched; bot 1 moves on to the next one. ({detail})",
     "ev.feedConnected": "Connected to PumpPortal: newborn coins and coins moving to an AMM pool now arrive instantly.",
     "ev.feedDisconnected": "Data connection dropped. Trying again in {seconds} seconds.",
     "ev.feedError": "The data source rejected a request: {detail}",
@@ -571,62 +551,18 @@ const I18N = {
     "help.funnel": "This list counts why bot 2 turned coins down. If one reason dominates, that is the gate worth looking at first.",
 
     // ---------- the three bots ----------
-    "bots.eyebrow": "THE THREE-BOT CHAIN",
-    "bots.title": "The bots and their jobs",
-    "bots.note": "bot 1 → bot 2 → bot 3",
-    "bot.on": "RUNNING",
-    "bot.off": "STOPPED",
-    "bot.now.off": "Not running yet.",
-    "bot.now.notStarted": "Waiting for the bots' first report.",
-    "bot.screener.name": "Bot 1 · Screening",
-    "bot.screener.stage": "every coin, any age",
     "bot.screener.badge": "BOT 1",
     "bot.screener.task": "Looks at every coin it can find — newborn ones and ones created a month ago — and writes down what it saw. It judges nothing.",
-    "bot.screener.detailsToggle": "Coins screened most recently",
-    "bot.screener.listEmpty": "No coins screened yet.",
-    "bot.screener.listRow": "{age} old · {marketCap}",
-    "bot.screener.now.waiting": "Starting to sweep the pool pages; the first coins arrive shortly.",
-    "bot.screener.now.working": "{perMinute} checks a minute, {newPerMinute} new coins a minute; {coins} different coins so far.",
-    "bot.filter.name": "Bot 2 · Filter",
-    "bot.filter.stage": "can it pump, or pump again?",
     "bot.filter.badge": "BOT 2",
     "bot.filter.task": "Re-judges everything bot 1 screens, over and over. A coin that has been quiet for months can turn green the hour its volume wakes up.",
-    "bot.filter.detailsToggle": "Coins that just went green",
-    "bot.filter.listEmpty": "No coin has passed yet.",
-    "bot.filter.listRow": "score {score} · {reason} · {age} old",
-    "bot.filter.now.waiting": "Waiting for the first coins from bot 1.",
-    "bot.filter.now.green": "{coins} judged able to pump and handed to bot 3.",
-    "bot.filter.now.none": "Judged {judged} coins so far; none strong enough yet.",
-    "bot.executor.name": "Bot 3 · Execution",
-    "bot.executor.stage": "when to buy, when to get out",
     "bot.executor.badge": "BOT 3",
     "bot.executor.task": "Measures how each green coin swings, then sets its own stop distance, trailing stop and entry moment. There are no strategy numbers to set.",
-    "bot.executor.detailsToggle": "What it is waiting for",
-    "bot.executor.listEmpty": "No coins being watched yet.",
-    "bot.executor.now.idle": "Waiting for green coins from bot 2.",
-    "bot.executor.now.watching": "Watching {coins} for the right moment to buy.",
-    "bot.executor.now.holding": "Holding {positions} right now.",
-    "bot.executor.now.blocked": "Entry held back: {reason}.",
-    "bot.stat.coins": "Coins screened",
-    "bot.stat.perMinute": "Checks per minute",
-    "bot.stat.newPerMinute": "New coins per minute",
-    "bot.stat.universe": "Coins being tracked",
-    "bot.stat.launches": "New coins / migrations",
-    "bot.stat.judged": "Judgements made",
-    "bot.stat.green": "Green now / total",
-    "bot.stat.red": "Turned down",
-    "bot.stat.topReason": "Most common reason",
-    "bot.stat.balance": "Practice balance",
-    "bot.stat.pnl": "Profit/loss",
-    "bot.stat.open": "Open positions",
-    "bot.stat.record": "Wins / losses",
-    "bot.stat.watching": "Being watched",
-    "bot.stat.entriesToday": "Buys today",
     "bot3.holding": "Holding it",
     "bot3.notWatching": "Not watched yet",
     // ---------- what bot 3 is waiting for ----------
     "waiting.measure": "Measuring how this coin swings",
     "waiting.dip": "Waiting for a {dip}% dip from the peak",
+    "waiting.high": "Waiting for a push to a new high",
     "waiting.bounce": "Waiting for a {bounce}% bounce off the low",
     "waiting.buyers": "Waiting for buyers to take over again",
     "waiting.spike": "The jump was too vertical; waiting for it to settle",
@@ -666,18 +602,22 @@ const I18N = {
     "now.green": "Bot 2 has flagged {coins} that could pump; bot 1 keeps screening {perMinute} coins a minute.",
     "now.screening": "Bot 1 has screened {coins} ({perMinute} a minute); bot 2 has not found one strong enough yet.",
     "exit.trail": "trailing stop",
+    "exit.break-even": "break-even (gains protected)",
+    "exit.max-hold-total": "maximum holding time",
     "exit.trail-locked": "trailing stop (profit locked)",
     "exit.stall": "stopped making highs",
     "exit.breakdown": "sellers took over",
     "ev.shutdown": "All three bots stopped; the practice account is saved.",
     "ev.greenScore": "Bot 2 calls a coin green from score {score} upwards.",
-    "ev.bot1.started": "Bot 1 started screening: {pages} pool pages round-robin every {seconds}s, plus {batch} coins refreshed every {refresh}s.",
+    "ev.bot1.started": "Bot 1 started screening: {pages} pool pages round-robin at {rate} calls a minute, and every coin it already knows re-checked at {recheck} coins a minute.",
     "ev.bot1.error": "Bot 1 could not fetch data: {detail}",
     "ev.bot2.green": "Bot 2: {token} could pump (score {score}, {reason}), {age} old.",
     "ev.bot2.greenSurge": "Bot 2: {token} could pump (score {score}) — volume {times}× a normal hour, {age} old.",
     "ev.bot2.ungreen": "Bot 2 took green away from {token}: {reason}",
     "ev.bot3.buy": "Bot 3 bought {token} at {mc} after a {dip}% dip and a {bounce}% bounce. Stop {stop}%, trailing {trail}% (this coin moves ~{vol}% a minute).",
     "ev.exit.trail": "Bot 3 sold {token} on its trailing stop: {pnl}",
+    "ev.exit.breakEven": "Bot 3 sold {token} at break-even to protect the gain it had: {pnl}",
+    "ev.exit.maxHoldTotal": "Bot 3 sold {token} because it hit the maximum holding time: {pnl}",
     "ev.exit.trailLocked": "Bot 3 sold {token} to lock the profit in: {pnl}",
     "ev.exit.stall": "Bot 3 sold {token} because it stopped making highs: {pnl}",
     "ev.exit.breakdown": "Bot 3 sold {token} because sellers took over: {pnl}",
@@ -687,13 +627,75 @@ const I18N = {
     "form.moneyTitle": "Money limits",
     "form.decideTitle": "What the bots decide themselves",
     "form.decideNote": "Bot 2 decides which coins could pump; bot 3 measures how each coin swings and sets its own entry, stop and exit. There are no strategy numbers to set here.",
-    "help.chain": "Three bots in a chain, not three separate bots: bot 1 screens every coin, bot 2 filters what it found, bot 3 trades what passes. One practice account for all three.",
-    "help.perMinute": "How many times bot 1 looked at a coin in the last minute, re-looks included. Hundreds a minute is normal.",
-    "help.green": "Green means bot 2 thinks the coin could pump right now. It is re-judged constantly, so it can be taken away again.",
-    "help.record": "How many closed practice trades made money against how many lost.",
-    "help.watching": "Green coins bot 3 is watching while it waits for its entry.",
+
+    "log.title": "Log",
+    "bot.screener.name": "screening bot",
+    "bot.filter.name": "filter bot",
+    "bot.executor.name": "executor bot",
+    "bot.storage.name": "database bot",
+    "bot.storage.task": "Keeps everything the three bots did: three log files and the practice account, in data/.",
+    "bot.screener.stat": "{coins} coins · {perMinute}/min",
+    "bot.filter.stat": "{green} green of {judged} judged",
+    "bot.executor.stat": "{open} open · {pnl} SOL",
+    "bot.storage.stat": "{lines} lines · {size}",
+    "bot.state.running": "running",
+    "bot.state.idle": "idle",
+    "bot.state.trading": "holding",
+    "bot.state.blocked": "held back",
+    "bot.state.starting": "starting…",
+    "bot.state.stopped": "stopped",
   },
 };
+
+// ---------- appearance ----------
+// Dark by default, light on request, and the operating system's preference decides for a visitor
+// who has never chosen. The choice is remembered per browser, like the language.
+const THEME_STORAGE_KEY = "launchpad.theme";
+const THEME_SUPPORTED = ["dark", "light"];
+
+function readStoredTheme() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored && THEME_SUPPORTED.includes(stored)) return stored;
+  } catch {
+    // private mode / blocked storage: fall through to the system preference
+  }
+  try {
+    if (window.matchMedia?.("(prefers-color-scheme: light)").matches) return "light";
+  } catch {
+    // matchMedia missing: stay dark
+  }
+  return "dark";
+}
+
+let activeTheme = readStoredTheme();
+const themeListeners = new Set();
+
+function theme() {
+  return activeTheme;
+}
+
+function onThemeChange(listener) {
+  themeListeners.add(listener);
+}
+
+function setTheme(next) {
+  if (!THEME_SUPPORTED.includes(next) || next === activeTheme) return;
+  activeTheme = next;
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch {
+    // not remembering it is survivable; the page still switches
+  }
+  applyTheme();
+  for (const listener of themeListeners) listener(activeTheme);
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = activeTheme;
+}
+
+applyTheme();
 
 let activeLang = readStoredLang();
 
@@ -801,6 +803,17 @@ function fmtClock(value) {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return "--:--:--";
   return date.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+// File sizes for the storage row. Unit symbols are the same in both languages.
+function fmtBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return mb < 10 ? `${mb.toFixed(1)} MB` : `${Math.round(mb)} MB`;
 }
 
 function fmtDuration(ms) {

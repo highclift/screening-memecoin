@@ -39,6 +39,11 @@ export function loadConfig(env = process.env) {
     throw new Error("SOLANA_RPC_URL must start with http:// or https://.");
   }
 
+  const entryMode = (env.ENTRY_MODE ?? "both").trim().toLowerCase();
+  if (!["dip", "breakout", "both"].includes(entryMode)) {
+    throw new Error("ENTRY_MODE must be dip, breakout, or both.");
+  }
+
   const c = {
     mode,
     dataSource: "pumpportal+dexscreener+geckoterminal",
@@ -55,13 +60,20 @@ export function loadConfig(env = process.env) {
     paperSlippageBps: numberFromEnv(env, "PAPER_SLIPPAGE_BPS", DEFAULTS.paperSlippageBps, { min: 0, max: 5000 }),
 
     // ---- bot 1: how wide and how fast it screens ----
-    discoveryTickMs: numberFromEnv(env, "DISCOVERY_TICK_MS", 2500, { min: 1000, max: 600_000 }),
-    // A GeckoTerminal call can take several seconds, so a tick fires a few at once. The per-minute
-    // budget below is what actually limits them (its free tier allows 30).
-    sweepConcurrency: numberFromEnv(env, "SWEEP_CONCURRENCY", 3, { min: 1, max: 5 }),
-    geckoCallsPerMinute: numberFromEnv(env, "GECKO_CALLS_PER_MINUTE", 20, { min: 1, max: 30 }),
+    // How often bot 1 asks whether a GeckoTerminal call may go out. The budget, not this tick, is
+    // what paces the calls; ticking faster than the budget costs nothing.
+    discoveryTickMs: numberFromEnv(env, "DISCOVERY_TICK_MS", 1000, { min: 250, max: 600_000 }),
+    // A call can take several seconds, so a few may be in the air at once.
+    maxSweepsInFlight: numberFromEnv(env, "MAX_SWEEPS_IN_FLIGHT", 3, { min: 1, max: 8 }),
+    // The ceiling, not a promise: GeckoTerminal documents 30/min but gives an individual IP less,
+    // so the feed halves its own rate whenever it is refused and creeps back up towards this.
+    geckoCallsPerMinute: numberFromEnv(env, "GECKO_CALLS_PER_MINUTE", 15, { min: 1, max: 30 }),
+    geckoMinCallsPerMinute: numberFromEnv(env, "GECKO_MIN_CALLS_PER_MINUTE", 4, { min: 1, max: 30 }),
     refreshIntervalMs: numberFromEnv(env, "REFRESH_INTERVAL_MS", 2000, { min: 500, max: 60_000 }),
     refreshBatchSize: numberFromEnv(env, "REFRESH_BATCH_SIZE", 30, { min: 1, max: 30 }),
+    // Calls per tick, run one after another. 3 x 30 coins every 2s is ~2,700 coin-refreshes a
+    // minute; DexScreener was measured answering 133 calls/min (~4,000 coins) without complaint.
+    refreshCallsPerTick: numberFromEnv(env, "REFRESH_CALLS_PER_TICK", 3, { min: 1, max: 10 }),
     maxUniverseTokens: numberFromEnv(env, "MAX_UNIVERSE_TOKENS", 20_000, { min: 100, max: 500_000 }),
 
     // ---- bot 2: how often a coin is re-judged, and where green starts ----
@@ -86,6 +98,13 @@ export function loadConfig(env = process.env) {
     topHoldersCount: numberFromEnv(env, "TOP_HOLDERS_COUNT", 5, { min: 1, max: 19 }),
     topHoldersSkipLargest: boolFromEnv(env, "TOP_HOLDERS_SKIP_LARGEST", true),
 
+    // ---- bot 3: which entries it is allowed to take ----
+    // dip      = only buy a pullback that bounces (best fill, misses coins that never dip)
+    // breakout = only buy new highs (catches the steady climbers, worse fill)
+    // both     = whichever comes first (default). Each entry records which trigger fired, so
+    //            `npm run report` can show whether one of them is actually making the money.
+    entryMode,
+
     // ---- bot 3: how closely it watches what it might buy ----
     watchPollIntervalMs: numberFromEnv(env, "WATCH_POLL_INTERVAL_MS", 3000, { min: 1000, max: 60_000 }),
     maxWatchlist: numberFromEnv(env, "MAX_WATCHLIST", 40, { min: 1, max: 500 }),
@@ -100,6 +119,9 @@ export function loadConfig(env = process.env) {
   }
   if (c.watchScore > c.greenScore) {
     throw new Error("WATCH_SCORE cannot be greater than GREEN_SCORE.");
+  }
+  if (c.geckoMinCallsPerMinute > c.geckoCallsPerMinute) {
+    throw new Error("GECKO_MIN_CALLS_PER_MINUTE cannot be greater than GECKO_CALLS_PER_MINUTE.");
   }
   return c;
 }

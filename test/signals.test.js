@@ -138,6 +138,24 @@ test("levels: a jumpy coin gets wider stops and less patience than a steady one"
   assert.ok(flat.tightTrailPct <= flat.trailPct, "the locked trail is never looser than the normal one");
 });
 
+test("levels: a flat stop and a trailing profit, with no fixed profit target", () => {
+  const levels = deriveLevels(0.04, roundTripCostPct({ paperFeeBps: 100, paperSlippageBps: 200 }));
+  // There is no takeProfitPct and there must never be one: a fixed target caps a winner exactly
+  // when it is working. The trail is what ends a winning trade.
+  assert.equal(levels.takeProfitPct, undefined);
+  assert.ok(levels.trailPct > 0 && levels.tightTrailPct > 0);
+
+  // The tightened trail must still be loose enough for the coin's own movement, or a runner gets
+  // stopped out on an ordinary wiggle.
+  assert.ok(levels.tightTrailPct >= 0.04 * 1.5 || levels.tightTrailPct >= levels.costPct);
+  assert.ok(levels.tightTrailPct <= levels.trailPct);
+
+  // The flat floor only ever ratchets upward, to entry plus what the round trip costs.
+  assert.equal(levels.breakEvenPct, levels.costPct);
+  assert.ok(levels.lockPct > levels.breakEvenPct, "break-even arms only after a real run");
+  assert.ok(levels.maxTotalHoldMs > levels.maxHoldMs);
+});
+
 test("levels: no stop is ever tighter than a round trip costs", () => {
   // With the default 100 bps fee + 200 bps slippage per side, a round trip costs 6% of the price.
   const cost = roundTripCostPct({ paperFeeBps: 100, paperSlippageBps: 200 });

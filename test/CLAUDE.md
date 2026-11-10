@@ -14,6 +14,11 @@
 - Dashboard JS must use `textContent` / DOM APIs, never `innerHTML` with coin names (they are untrusted).
   The one `innerHTML` path is `data-i18n-html` in `public/i18n.js`, which only ever renders dictionary
   strings. Never route coin names, log text or API errors through it.
+- No raw colour in `styles.css` outside the two `:root` token blocks, and every token the dark
+  theme defines must be redefined by the light one. Elevation differs by theme on purpose: dark
+  raises a surface by making it LIGHTER (--surface-1/2/3 climb), light keeps everything white and
+  raises it with --shadow-1/2. --good is lime TEXT, --good-fill is the lime BUTTON FILL (on white
+  they must differ, or the text is unreadable). test/i18n.test.js checks contrast in both themes.
 - No user-visible string is hard-coded in `public/`: add a key to both `id` and `en` in
   `public/i18n.js` and render it with `t()` (or `tn()` when a count needs singular/plural).
   `test/i18n.test.js` enforces parity and that every key referenced actually exists.
@@ -31,14 +36,19 @@ Not three independent bots — three stages, each handing work to the next (see 
 
 1. **`src/bots/screener.js` (bot 1)** — screens every coin at any age and logs it. Nothing here
    rejects a coin. Sources: PumpPortal websocket (launches/migrations), a round-robin sweep of 17
-   GeckoTerminal pages (new/trending/top volume), and DexScreener refreshes aimed at whoever is
-   closest to a decision. ~90-120 new coins a minute measured live. `data/bot1-screened.jsonl`.
+   GeckoTerminal pages (new/trending/top volume, weighted so page 1 comes round 4-5x per cycle),
+   and a DexScreener rotation that re-checks EVERY coin in the registry (~2,700 coins/min, closest
+   to a decision first — never drop a quiet coin, that is the one that wakes up). 65-140 new coins
+   a minute measured live, every age band. `data/bot1-screened.jsonl`.
 2. **`src/bots/filter.js` (bot 2)** — re-judges everything, forever: dev history → hard gates →
    pump score → holders (RPC). Age is never part of the decision, which is what lets a month-old
    coin go green the hour its volume wakes up. `data/bot2-filtered.jsonl`.
 3. **`src/bots/executor.js` (bot 3)** — one paper account. Measures each coin's own volatility,
    derives dip/bounce/stop/trail/patience from it (`deriveLevels`), and refuses to buy a coin it has
-   not measured. No strategy settings exist. `data/bot3-trades.jsonl`.
+   not measured. No strategy settings exist. **Flat stop + trailing take-profit, no profit target**:
+   the trail is what ends a winning trade, `stall` only fires while the trade is NOT in profit, and
+   `max-hold` counts from the last new high — all so a runner is never cut off. Once a trade has
+   been up by `lockPct` the flat floor ratchets to break-even. `data/bot3-trades.jsonl`.
 
 `src/index.js` is the wiring only: `onScreened -> filter.consider -> executor.watch/onData`, plus the
 status it publishes to the dashboard every second. One process, so the three share one API budget.
@@ -55,8 +65,8 @@ status it publishes to the dashboard every second. One process, so the three sha
   `i18n.js` all UI strings + `t`/`tn` + locale formatters + `applyStaticText`; `anim.js`
   `setText`/`setNumber` (eased) / `markNew`; `humanize.js` turns raw log lines into plain sentences
   (`humanizeLog`) and provides the label helpers (`categoryLabel`, `leadText`, `waitingText`,
-  `surgeText`, `fmtScore`); `bots-view.js` the three bot cards + the "what is happening now"
-  headline; `funnel.js` bot 2's rejection reasons; `app.js` the fetch loop and the rest.
+  `surgeText`, `fmtScore`); `bots-view.js` four compact bot rows (screening / filter / executor / storage) + the
+  "what is happening now" headline; `funnel.js` bot 2's rejection reasons; `app.js` the fetch loop and the rest.
 - `test/`: node:test suites, all offline. `PIPELINE.md`: how the three bots work. `.env.example`: all settings.
 
 ## Things that are easy to get wrong
@@ -64,27 +74,38 @@ status it publishes to the dashboard every second. One process, so the three sha
 - Bot 3 must see the verdict from this pass, so `filter.consider` runs before `executor.onData` in
   `onScreened`.
 - No stop may be tighter than a round trip costs (`roundTripCostPct`), or the trailing stop fires
-  inside the spread and books a loss the price never made.
+  inside the spread and books a loss the price never made. Note the knock-on: `PAPER_FEE_BPS=100` +
+  `PAPER_SLIPPAGE_BPS=200` is a 6% round trip, which forces every stop to 9% and biases the bot
+  towards only the wildest coins. Realistic is nearer 25-30 bps fee and 50-100 bps slippage.
+- Two entry triggers (`ENTRY_MODE`, default `both`): `dip-and-bounce` buys a retrace, `breakout`
+  buys a new high. The pullback is about the PRICE PAID, not about coin safety — do not remove it
+  because a safety filter was added elsewhere; they are unrelated. Every entry records its trigger
+  so the report can compare them.
+- Never add a fixed take-profit. It caps a winner exactly when it is working; the trail is the
+  profit-taker. Same for cutting a profitable trade on a timer.
 - `Number(null)` is 0, not NaN: use the null guards when formatting optional numbers.
-- GeckoTerminal answers a burst of simultaneous calls with a 429 (a minute of backoff), so the
-  concurrent sweep calls are staggered by 300ms and everything goes through `createBudget`.
+- GeckoTerminal gives an individual IP far less than its documented 30 calls/min, and answers a
+  BURST with 429 even when the average is legal. Calls are paced evenly by `createBudget`
+  (minIntervalMs), the feed halves its rate on a 429 and creeps back up but never past a refused
+  rate, and the result is remembered in `data/feed-state.json`. Settles at 4-7/min here. Never
+  "fix" a 429 by raising the budget.
 - A 0 for market cap, liquidity or price means "not reported" from both APIs; a 0 volume is real.
 
 ## Status
 The three-bot rewrite replaced the old three-lane design (`fresh`/`young`/`veteran`, one balance
 each), which screened different coins per lane and could never look at an old coin waking up.
-67 unit tests pass. Verified against the live APIs: bot 1 screened 118 coins in 80s across every age
+88 unit tests pass. Verified against the live APIs: bot 1 screened 118 coins in 80s across every age
 band (24 of them older than 30 days), bot 2 turned a real 52-day-old coin green at 6-10x its normal
 hourly volume, and bot 3 entered and exited by itself with per-coin levels, including a profitable
-`trail-locked` exit. The dashboard was driven end to end through `/api/state`.
+`trail-locked` exit. The dashboard was driven end to end through `/api/state`. The CSS for the new card lists was added
+by hand but never seen in a browser.
 
 ## Not verified yet
-- The dashboard has not been opened in a browser since the rewrite. The payload, the dictionary and
-  the humanizer are covered by tests, but the DOM rendering (`bots-view.js`, the new screener table,
-  `styles.css` class reuse) has only been read, not seen. **Check this first**, especially: the three
-  bot cards, the `bot-detail-list` / `bot-detail-row` / `bot-detail-name` / `bot-detail-meta` classes
-  used by the card lists (they may need CSS — the other classes are reused from the old lane cards),
-  and the language switch.
+- The dashboard has not been opened in a browser since the rewrite (now four bot rows beside the
+  log, per the user's mockup). The payload, the dictionary and
+  the humanizer are covered by tests, but the DOM rendering has only been read, not seen. **Check
+  this first**: the three bot cards, the `bot-detail-*` classes added to `styles.css` for the card
+  lists, the new screener table columns, and the language switch.
 - Whether the weights in `PUMP_WEIGHTS`, `GREEN_SCORE` and the multipliers in `deriveLevels` are any
   good. They are starting points. `npm run report` compares score buckets against outcomes.
 - PumpPortal delivers few `create` events to an unauthenticated client (3-12 a minute observed),

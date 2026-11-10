@@ -17,13 +17,22 @@ export const EXCLUDED_BASE_MINTS = new Set([
   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
 ]);
 
-// Worked through round-robin, one call per discovery tick. "new" catches coins minutes old,
-// "trending" catches whatever the market is looking at right now, and "top" walks ten pages of the
-// highest-volume pools on Solana, which is where a month-old coin that woke up turns up again.
-export const DISCOVERY_JOBS = [
+// "new" catches coins minutes old, "trending" catches what the market is looking at right now, and
+// "top" walks ten pages of the highest-volume pools on Solana, which is where a month-old coin that
+// woke up turns up again.
+//
+// The pages are not equally valuable, and the call rate is low (GeckoTerminal gives an individual
+// IP far less than its documented 30/min). Cycling all of them evenly would mean the first page of
+// trending — where a coin waking up shows first — comes round as rarely as page 9 of the volume
+// ranking. So the rotation interleaves the hot pages between the rest: they come round several
+// times per cycle, the deep pages once.
+const HOT_PAGES = [
   { kind: "new", page: 1 },
   { kind: "trending", page: 1 },
   { kind: "top", page: 1 },
+];
+
+const DEEP_PAGES = [
   { kind: "new", page: 2 },
   { kind: "trending", page: 2 },
   { kind: "top", page: 2 },
@@ -40,23 +49,58 @@ export const DISCOVERY_JOBS = [
   { kind: "top", page: 10 },
 ];
 
+export function buildRotation(hot = HOT_PAGES, deep = DEEP_PAGES) {
+  const rotation = [];
+  deep.forEach((job, index) => {
+    rotation.push(hot[index % hot.length], job);
+  });
+  return rotation;
+}
+
+// Worked through round-robin, one call at a time, paced by the shared budget.
+export const DISCOVERY_JOBS = buildRotation();
+export const DISCOVERY_PAGE_COUNT = HOT_PAGES.length + DEEP_PAGES.length;
+
 // Sliding-window limiter shared by every GeckoTerminal call (discovery, refresh, unique-buyer checks).
-export function createBudget(callsPerMinute, now = () => Date.now()) {
+//
+// `minIntervalMs` is what keeps us out of trouble: GeckoTerminal tolerates the per-minute average
+// but answers a burst with 429, and spending a whole minute's allowance in the first fifteen
+// seconds is a burst. With a minimum gap the calls go out evenly instead.
+// The rate can be changed while running: the documented limit (30/min) is not the limit this IP
+// actually gets, so the feed halves the rate when it is refused and creeps back up when it is not.
+export function createBudget(callsPerMinute, now = () => Date.now(), { minIntervalMs = null } = {}) {
   const stamps = [];
+  let lastAt = -Infinity;
+  let limit = callsPerMinute;
+  let gap = minIntervalMs === null ? 0 : minIntervalMs;
   const prune = () => {
     const t = now();
     while (stamps.length && t - stamps[0] >= 60_000) stamps.shift();
   };
+  const ready = () => {
+    prune();
+    return stamps.length < limit && now() - lastAt >= gap;
+  };
   return {
+    // True when a call may go out right now. Checking and taking happen without an await in
+    // between, so the answer cannot go stale.
+    ready,
     tryTake() {
-      prune();
-      if (stamps.length >= callsPerMinute) return false;
-      stamps.push(now());
+      if (!ready()) return false;
+      lastAt = now();
+      stamps.push(lastAt);
       return true;
     },
     used() {
       prune();
       return stamps.length;
+    },
+    rate() {
+      return limit;
+    },
+    setRate(perMinute) {
+      limit = Math.max(1, Math.round(perMinute));
+      if (minIntervalMs !== null) gap = Math.ceil(60_000 / limit);
     },
   };
 }

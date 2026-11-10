@@ -346,7 +346,6 @@ app.post("/api/reset-account", (req, res) => {
 
 const httpServer = app.listen(PORT, HOST, () => {
   console.log(`Paper trading dashboard: http://${HOST}:${PORT}`);
-  console.log("Server hanya menerima koneksi dari komputer ini.");
   addLog(`[web] Dashboard aktif di http://${HOST}:${PORT}.`);
 });
 

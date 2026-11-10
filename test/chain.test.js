@@ -211,7 +211,7 @@ function walkToEntry(p, mint, startAt = 1_700_000_000_000) {
 }
 
 test("bot 3 measures first, then buys the dip-and-bounce and sets stops from that coin's own swing", () => {
-  const p = pipeline();
+  const p = pipeline({ ENTRY_MODE: "dip" });
   const now = feed(p, "CCC", CLIMB, 1_700_000_000_000);
   assert.equal(p.executor.status().openPositions, 0, "a coin that only goes up is never bought");
   assert.equal(p.executor.status().watching[0].waitingFor, "dip");
@@ -238,7 +238,7 @@ test("bot 3 measures first, then buys the dip-and-bounce and sets stops from tha
 });
 
 test("bot 3 exits on its own trailing stop, and the trade lands in the account", () => {
-  const p = pipeline();
+  const p = pipeline({ ENTRY_MODE: "dip" });
   const { now, marketCapUsd } = walkToEntry(p, "DDD");
   assert.equal(p.executor.status().openPositions, 1, "needs a position before it can exit one");
   const position = p.executor.status().positions[0];
@@ -263,7 +263,7 @@ test("bot 3 exits on its own trailing stop, and the trade lands in the account",
 });
 
 test("bot 3 will not trade a dip that is only two sources disagreeing", () => {
-  const p = pipeline();
+  const p = pipeline({ ENTRY_MODE: "dip" });
   let now = 1_700_000_000_000;
   // Measured and climbing on GeckoTerminal's numbers, which report FDV for this coin: ~$850k.
   for (const marketCapUsd of CLIMB) {
@@ -285,6 +285,149 @@ test("bot 3 will not trade a dip that is only two sources disagreeing", () => {
   assert.equal(status.watching[0].peakMarketCapUsd, 120_000, "and forgets the peak it measured differently");
 });
 
+// Drives a coin that is already held to a given market cap, repeatedly, and returns the trade if
+// bot 3 closed it.
+function pushTo(p, mint, series, startAt) {
+  let now = startAt;
+  for (const marketCapUsd of series) {
+    p.screen({ mint, symbol: mint, ageSeconds: 7200, ...pumping(marketCapUsd) }, now);
+    now += 5000;
+  }
+  return { now, trade: p.executor.status().closedTrades[0] ?? null };
+}
+
+test("bot 3 lets a winner run instead of taking a fixed profit", () => {
+  const p = pipeline({ ENTRY_MODE: "dip" });
+  const { now, marketCapUsd } = walkToEntry(p, "RUNNER");
+  assert.equal(p.executor.status().openPositions, 1);
+  const { stopPct, trailPct } = p.executor.status().positions[0];
+
+  // Up and up. An old-style take-profit target would have sold somewhere in here.
+  let clock = now;
+  let price = marketCapUsd;
+  for (let step = 0; step < 12; step += 1) {
+    price = Math.round(price * 1.08);
+    clock = pushTo(p, "RUNNER", [price], clock).now;
+  }
+  const status = p.executor.status();
+  assert.equal(status.openPositions, 1, `sold early at +${((price / marketCapUsd - 1) * 100).toFixed(0)}%`);
+  assert.ok(price / marketCapUsd > 2, "the coin more than doubled and bot 3 is still holding");
+  assert.ok(stopPct > 0 && trailPct > 0);
+
+  // Only when it finally gives back more than the trail does it sell — and it keeps the gain.
+  const peak = price;
+  pushTo(p, "RUNNER", [Math.round(peak * 0.7)], clock);
+  const closed = p.executor.status().closedTrades[0];
+  assert.ok(closed, "the trail ended the trade");
+  assert.equal(closed.reason, "trail-locked");
+  assert.ok(closed.pnlSol > 0, `a doubled coin should close green, got ${closed.pnlSol}`);
+});
+
+test("bot 3 will not let a trade that was well up turn into a loss", () => {
+  const p = pipeline({ ENTRY_MODE: "dip" });
+  const { now, marketCapUsd } = walkToEntry(p, "GIVEBACK");
+  const entry = linesOf(p.journals.executor).find((row) => row.type === "entry");
+  assert.ok(entry.levels.lockPct > 0 && entry.levels.breakEvenPct >= 0, "the trade recorded its levels");
+
+  // Up past the lock threshold, so the flat floor ratchets to break-even...
+  const high = Math.round(marketCapUsd * 1.35);
+  let clock = pushTo(p, "GIVEBACK", [high], now).now;
+  assert.equal(p.executor.status().openPositions, 1);
+
+  // ...then all the way back down. It must not ride it to the original stop.
+  pushTo(p, "GIVEBACK", [Math.round(marketCapUsd * 1.0)], clock);
+  const closed = p.executor.status().closedTrades[0];
+  assert.ok(closed, "it closed rather than giving everything back");
+  assert.ok(["break-even", "trail-locked"].includes(closed.reason), `closed as ${closed.reason}`);
+  assert.ok(closed.exitMarketCapUsd >= marketCapUsd * 0.95, "it got out near where it went in");
+});
+
+test("a locked trade that gaps through the floor is reported as the loss it was", () => {
+  const p = pipeline({ ENTRY_MODE: "dip" });
+  const { now, marketCapUsd } = walkToEntry(p, "GAPPY");
+  // Well up, so the break-even floor arms...
+  let clock = pushTo(p, "GAPPY", [Math.round(marketCapUsd * 1.4)], now).now;
+  assert.equal(p.executor.status().openPositions, 1);
+  // ...then one tick straight through it to below entry. Polling is every couple of seconds, so
+  // this happens; the label must not claim break-even on a losing exit.
+  pushTo(p, "GAPPY", [Math.round(marketCapUsd * 0.8)], clock);
+  const closed = p.executor.status().closedTrades[0];
+  assert.ok(closed);
+  assert.ok(closed.pnlSol < 0, "it was a loss");
+  assert.notEqual(closed.reason, "break-even", "a losing exit must not be filed as break-even");
+});
+
+test("bot 3 still cuts a trade that never worked", () => {
+  const p = pipeline({ ENTRY_MODE: "dip" });
+  const { now, marketCapUsd } = walkToEntry(p, "DUD");
+  const { stopPct } = p.executor.status().positions[0];
+  // Straight down from entry, past the flat stop.
+  pushTo(p, "DUD", [Math.round(marketCapUsd * (1 - stopPct - 0.03))], now);
+  const closed = p.executor.status().closedTrades[0];
+  assert.ok(closed);
+  assert.ok(["stop-loss", "trail"].includes(closed.reason), `closed as ${closed.reason}`);
+  assert.ok(closed.pnlSol < 0);
+});
+
+test("bot 3 buys a coin that climbs without ever dipping", () => {
+  // The case that made this mode exist: a steady climber never pulls back 1.2x its own move, so
+  // dip-only would watch the whole run go past.
+  const p = pipeline({ ENTRY_MODE: "both" });
+  feed(p, "CLIMBER", CLIMB, 1_700_000_000_000);
+  const status = p.executor.status();
+  assert.equal(status.openPositions, 1, "a coin that only goes up is still bought");
+
+  const entry = linesOf(p.journals.executor).find((row) => row.type === "entry");
+  assert.equal(entry.trigger, "breakout", "and the journal says which trigger fired");
+  assert.equal(entry.dipFromPeakPct, 0);
+  assert.ok(entry.levels.stopPct > 0, "it still sized its stop from the coin's own movement");
+});
+
+test("dip-only mode still refuses the climber, breakout-only still refuses the retrace", () => {
+  const dipOnly = pipeline({ ENTRY_MODE: "dip" });
+  feed(dipOnly, "CLIMBER", CLIMB, 1_700_000_000_000);
+  assert.equal(dipOnly.executor.status().openPositions, 0);
+  assert.equal(dipOnly.executor.status().watching[0].waitingFor, "dip");
+
+  // Breakout-only: a coin falling back from its high is not bought, however far it bounces.
+  const breakoutOnly = pipeline({ ENTRY_MODE: "breakout" });
+  const now = feed(breakoutOnly, "FADER", CLIMB, 1_700_000_000_000);
+  assert.equal(breakoutOnly.executor.status().openPositions, 1, "it bought the first new high");
+  // Now a second coin that only ever falls: no new high, no entry.
+  feed(breakoutOnly, "FALLER", [100_000, 99_000, 97_000, 96_000, 94_000, 93_000, 92_000, 91_000, 90_000, 89_000, 88_000], now);
+  const waiting = breakoutOnly.executor.status().watching.find((c) => c.mint === "FALLER");
+  assert.ok(waiting, "still watching it");
+  assert.ok(["high", "measure"].includes(waiting.waitingFor), `waiting for ${waiting.waitingFor}`);
+});
+
+test("a breakout entry still refuses a vertical candle and a seller-dominated coin", () => {
+  // Same fill guards as the dip entry: bot 2 judged the coin, these are about the price paid.
+  // Drifting down from the first sample, so no new high is set and nothing is bought while it
+  // measures...
+  const spiky = pipeline({ ENTRY_MODE: "breakout" });
+  let now = feed(spiky, "SPIKE", [120_000, 118_000, 116_000, 115_000, 113_000, 112_000, 110_000, 109_000, 108_000, 107_000, 106_000], 1_700_000_000_000);
+  assert.equal(spiky.executor.status().openPositions, 0);
+
+  // ...then one vertical candle straight past the old high. That is a terrible fill, so it waits
+  // for the next measurement instead of buying the spike.
+  feed(spiky, "SPIKE", [260_000], now);
+  assert.equal(spiky.executor.status().openPositions, 0, "it did not buy the vertical candle");
+  assert.equal(spiky.executor.status().watching[0].waitingFor, "spike");
+
+  const sellers = pipeline({ ENTRY_MODE: "breakout" });
+  let clock = 1_700_000_000_000;
+  for (const marketCapUsd of CLIMB) {
+    // Green on volume, but sellers dominate the hour: the fill guard blocks it.
+    sellers.screen({
+      mint: "SELLY", symbol: "SELLY", ageSeconds: 7200,
+      ...pumping(marketCapUsd), buysH1: 150, sellsH1: 450, tradesH1: 600,
+    }, clock);
+    clock += 5000;
+  }
+  assert.equal(sellers.executor.status().openPositions, 0, "not bought while sellers dominate");
+  assert.equal(sellers.executor.status().watching[0].waitingFor, "buyers");
+});
+
 test("bot 3 holds off when a money limit says no, and keeps watching the coin", () => {
   const p = pipeline({ MAX_ENTRIES_PER_DAY: "1", PAPER_START_BALANCE_SOL: "1", BUY_AMOUNT_SOL: "0.01" });
   p.account.daily.entries = 1; // the day's one entry is already spent
@@ -301,6 +444,7 @@ test("bot 1 screens launches and migrations and logs every coin it sees", () => 
   const filePath = tmpFile("bot1-feed.jsonl");
   const journal = createJournal({ filePath });
   const stubFeed = {
+    canSweep: () => true,
     sweep: async () => [],
     pools: async () => [],
     snapshots: async () => new Map(),
@@ -340,6 +484,53 @@ test("bot 1 screens launches and migrations and logs every coin it sees", () => 
   journal.stop();
 });
 
+test("bot 1 keeps re-checking coins that went quiet — that is how a revival is caught", async () => {
+  const p = pipeline();
+  const now = 1_700_000_000_000;
+  // A coin met two hours ago that has done nothing since. The old rotation dropped anything idle
+  // for 30 minutes, which meant the one coin most likely to wake up was the one we stopped looking
+  // at.
+  p.universe.observe({ mint: "SLEEPY", symbol: "SLEEPY", marketCapUsd: 300_000, source: "gecko:top" }, now - 2 * 3_600_000);
+  for (let i = 0; i < 5; i += 1) {
+    p.universe.observe({ mint: `other-${i}`, marketCapUsd: 100_000, source: "gecko:top" }, now);
+  }
+
+  const asked = [];
+  const journal = createJournal({ filePath: tmpFile("bot1-recheck.jsonl") });
+  const screener = createScreener({
+    config: { ...p.config, refreshCallsPerTick: 1, refreshBatchSize: 30 },
+    universe: p.universe,
+    feed: {
+      canSweep: () => false, // GeckoTerminal paused: the re-check must not depend on it
+      sweep: async () => [],
+      pools: async () => [],
+      snapshots: async (mints) => {
+        asked.push(...mints);
+        return new Map();
+      },
+      solUsd: () => SOL_USD,
+      geckoCallsUsed: () => 0,
+    },
+    journal,
+    devBook: p.devBook,
+    log: () => {},
+    note: () => {},
+    onScreened: () => {},
+  });
+
+  screener.start();
+  await new Promise((resolve) => setTimeout(resolve, 2300));
+  screener.stop();
+  journal.stop();
+
+  assert.ok(asked.includes("SLEEPY"), "a coin idle for two hours is still in the rotation");
+  assert.equal(new Set(asked).size, 6, "and so is everything else we know about");
+  // How long a full pass takes, which with six coins and 900 refreshes a minute rounds to nothing.
+  const { recheckSeconds } = screener.status();
+  assert.ok(Number.isFinite(recheckSeconds) && recheckSeconds >= 0, `recheckSeconds was ${recheckSeconds}`);
+  assert.ok(recheckSeconds < 5, "a tiny registry is re-checked almost immediately");
+});
+
 test("bot 1 screens a sweep page without judging any of it", async () => {
   const p = pipeline();
   const filePath = tmpFile("bot1-sweep.jsonl");
@@ -355,6 +546,7 @@ test("bot 1 screens a sweep page without judging any of it", async () => {
     config: { ...p.config, discoveryTickMs: 10_000, refreshIntervalMs: 10_000 },
     universe: p.universe,
     feed: {
+      canSweep: () => true,
       sweep: async () => rows,
       pools: async () => [],
       snapshots: async () => new Map(),

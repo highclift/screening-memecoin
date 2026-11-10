@@ -29,16 +29,35 @@ export function createJournal({
         if (error.code !== "ENOENT") throw error;
       }
       fs.appendFileSync(filePath, chunk, "utf8");
+      lastError = "";
     } catch (error) {
+      lastError = error.message;
       onError(error);
     }
   }
+
+  let written = 0; // lines handed to this journal since start
+  let lastError = "";
 
   return {
     filePath,
     write(entry) {
       buffer.push(`${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`);
+      written += 1;
       if (buffer.length > MAX_BUFFERED) buffer.splice(0, buffer.length - MAX_BUFFERED);
+    },
+
+    // What the dashboard's storage row shows: how much has been written and whether it landed.
+    stats() {
+      let bytes = 0;
+      for (const file of [filePath, `${filePath}.1`]) {
+        try {
+          bytes += fs.statSync(file).size;
+        } catch {
+          // not created yet, or already rotated away
+        }
+      }
+      return { filePath, lines: written, bytes, pending: buffer.length, lastError };
     },
     start() {
       if (timer) return;

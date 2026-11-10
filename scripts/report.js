@@ -56,10 +56,20 @@ function ageBucket(seconds) {
   return "> 30d";
 }
 
+// Bot 1's log runs to hundreds of thousands of lines, so nothing here may spread an array into
+// Math.max / Math.min — that overflows the call stack.
 function span(records) {
-  const times = records.map((r) => Date.parse(r.t)).filter(Number.isFinite);
-  if (times.length < 2) return null;
-  return (Math.max(...times) - Math.min(...times)) / 60_000;
+  let min = Infinity;
+  let max = -Infinity;
+  let seen = 0;
+  for (const record of records) {
+    const t = Date.parse(record.t);
+    if (!Number.isFinite(t)) continue;
+    if (t < min) min = t;
+    if (t > max) max = t;
+    seen += 1;
+  }
+  return seen < 2 ? null : (max - min) / 60_000;
 }
 
 console.log("Paper results only: they ignore latency, failed sells and rugs you cannot exit.\n");
@@ -106,36 +116,63 @@ else {
   const total = exits.reduce((sum, r) => sum + (Number(r.pnlSol) || 0), 0);
   const held = exits.reduce((sum, r) => sum + (Number(r.heldSeconds) || 0), 0);
   console.log(`entries ${entries.length} | closed ${exits.length} | win rate ${pct(wins, exits.length)} | total ${sol(total)} SOL | avg ${exits.length ? sol(total / exits.length) : "-"} SOL | avg hold ${exits.length ? Math.round(held / exits.length) : "-"}s`);
-  if (exits.length) console.log(`exits by reason: ${list(counted(exits, "reason"), 10)}`);
+  if (exits.length) {
+    console.log(`exits by reason: ${list(counted(exits, "reason"), 10)}`);
+    // With a trailing take-profit and no target, this is the question that matters: are winners
+    // being ended by the trail (good) or by a timer / the stop coming back (not good)?
+    const winners = exits.filter((r) => r.pnlSol > 0);
+    if (winners.length) {
+      console.log(`how winners ended: ${list(counted(winners, "reason"), 10)}`);
+      const best = winners.map((r) => r.pnlSol).sort((a, b) => b - a)[0];
+      console.log(`best single trade ${sol(best)} SOL | average winner ${sol(winners.reduce((t, r) => t + r.pnlSol, 0) / winners.length)} SOL`);
+    }
+  }
   if (entries.length) {
     console.log(`entries by coin age: ${list(counted(entries.map((r) => ({ bucket: ageBucket(r.ageSeconds) })), "bucket"))}`);
     const blocked = bot3.records.filter((r) => r.type === "blocked");
     if (blocked.length) console.log(`entries held back by a money limit: ${list(counted(blocked, "reason"))}`);
   }
 
-  // Does bot 2's score separate winners from losers? Pairs each exit with the entry before it.
+  // Pair each exit with the entry before it, then slice the outcomes two ways.
   const lastEntry = new Map();
-  const buckets = {};
+  const byScore = {};
+  const byTrigger = {};
+  const bucket = (table, key) => (table[key] = table[key] ?? { trades: 0, wins: 0, pnl: 0 });
   for (const row of bot3.records) {
     if (row.type === "entry") lastEntry.set(row.mint, row);
     if (row.type === "exit" && lastEntry.has(row.mint)) {
       const entry = lastEntry.get(row.mint);
       lastEntry.delete(row.mint);
+      const won = row.pnlSol > 0;
+      const pnl = Number(row.pnlSol) || 0;
+
+      const trigger = bucket(byTrigger, entry.trigger ?? "unknown");
+      trigger.trades += 1;
+      if (won) trigger.wins += 1;
+      trigger.pnl += pnl;
+
       if (!Number.isFinite(entry.score)) continue;
       const key = entry.score >= 0.8 ? "0.80+" : entry.score >= 0.7 ? "0.70-0.79" : entry.score >= 0.6 ? "0.60-0.69" : "below 0.60";
-      buckets[key] = buckets[key] ?? { trades: 0, wins: 0, pnl: 0 };
-      buckets[key].trades += 1;
-      if (row.pnlSol > 0) buckets[key].wins += 1;
-      buckets[key].pnl += Number(row.pnlSol) || 0;
+      const score = bucket(byScore, key);
+      score.trades += 1;
+      if (won) score.wins += 1;
+      score.pnl += pnl;
     }
   }
-  const rows = Object.entries(buckets).sort((a, b) => b[0].localeCompare(a[0]));
-  if (rows.length > 1) {
-    console.log("\nbot 2 score vs outcome (does a higher score actually win more?):");
+
+  const table = (title, rows) => {
+    if (rows.length < 2) return;
+    console.log(`\n${title}`);
     for (const [key, value] of rows) {
-      console.log(`  score ${key.padEnd(10)} trades ${String(value.trades).padStart(4)} | win rate ${pct(value.wins, value.trades).padStart(4)} | total ${sol(value.pnl)} SOL`);
+      console.log(`  ${key.padEnd(16)} trades ${String(value.trades).padStart(4)} | win rate ${pct(value.wins, value.trades).padStart(4)} | total ${sol(value.pnl)} SOL | avg ${sol(value.pnl / value.trades)} SOL`);
     }
-  }
+  };
+  // Buying a retrace gets a better price; buying a breakout catches coins that never retrace.
+  // Which one is actually paying is a question only the journal can answer.
+  table("entry trigger vs outcome (is the dip or the breakout making the money?):",
+    Object.entries(byTrigger).sort((a, b) => b[1].trades - a[1].trades));
+  table("bot 2 score vs outcome (does a higher score actually win more?):",
+    Object.entries(byScore).sort((a, b) => b[0].localeCompare(a[0])));
 }
 
 // ---------- account ----------

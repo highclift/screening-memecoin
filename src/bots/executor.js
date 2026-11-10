@@ -216,12 +216,23 @@ export function createExecutor({ config, universe, journal, account, persist, so
     }
     const levels = deriveLevels(volPct, roundTripCostPct(config));
 
+    // A new high. In "dip" mode that only resets the pullback tracking and we wait; in the other
+    // modes it is itself a reason to buy — a coin that climbs steadily never dips, and waiting for
+    // a pullback that never comes is how a bot watches a whole move go past. The entry price is
+    // worse than buying a retrace, which is why both triggers are tagged in the journal and the
+    // report compares what each one actually earned.
     if (watchState.peak === null || marketCapUsd > watchState.peak) {
       watchState.peak = marketCapUsd;
       watchState.low = marketCapUsd;
       watchState.pulledBack = false;
-      return { waitingFor: "dip", levels };
+      if (config.entryMode === "dip") return { waitingFor: "dip", levels };
+      const blocked = entryGuard(record, levels);
+      if (blocked) return { waitingFor: blocked, levels };
+      return { trigger: "breakout", levels, dipFromPeakPct: 0, reboundPct: 0 };
     }
+    // "breakout" mode buys new highs and nothing else.
+    if (config.entryMode === "breakout") return { waitingFor: "high", levels };
+
     if (!watchState.pulledBack) {
       if (marketCapUsd <= watchState.peak * (1 - levels.dipPct)) {
         watchState.pulledBack = true;
@@ -238,18 +249,8 @@ export function createExecutor({ config, universe, journal, account, persist, so
     const reboundPct = marketCapUsd / watchState.low - 1;
     if (reboundPct < levels.bouncePct) return { waitingFor: "bounce", levels };
 
-    // The bounce is there. Two last sanity checks before spending anything.
-    const share = buyShare(record);
-    if (share !== null && share < 0.5) return { waitingFor: "buyers", levels };
-
-    const snapshots = record.snapshots;
-    const last = snapshots[snapshots.length - 1];
-    const previous = snapshots[snapshots.length - 2];
-    if (last && previous && previous.marketCapUsd > 0) {
-      const step = last.marketCapUsd / previous.marketCapUsd - 1;
-      // A vertical candle is a bad fill: wait for the next measurement instead of buying the spike.
-      if (step > levels.volPct * 3) return { waitingFor: "spike", levels };
-    }
+    const blocked = entryGuard(record, levels);
+    if (blocked) return { waitingFor: blocked, levels };
 
     return {
       trigger: "dip-and-bounce",
@@ -259,21 +260,62 @@ export function createExecutor({ config, universe, journal, account, persist, so
     };
   }
 
+  // The two checks that apply however the entry was triggered. Returns null to go ahead, or what
+  // it is waiting for. These are about the fill, not about the coin: bot 2 already judged the coin.
+  function entryGuard(record, levels) {
+    const share = buyShare(record);
+    if (share !== null && share < 0.5) return "buyers";
+
+    const snapshots = record.snapshots;
+    const last = snapshots[snapshots.length - 1];
+    const previous = snapshots[snapshots.length - 2];
+    if (last && previous && previous.marketCapUsd > 0) {
+      const step = last.marketCapUsd / previous.marketCapUsd - 1;
+      // A vertical candle is a bad fill: wait for the next measurement instead of buying the spike.
+      if (step > levels.volPct * 3) return "spike";
+    }
+    return null;
+  }
+
   // ---------- exit ----------
+  // A flat stop and a trailing take-profit. Nothing here sells at a fixed profit target: the trail
+  // is what ends a winning trade, so a coin that keeps climbing is never cut off at an arbitrary
+  // number.
   function exitReasonFor(position, marketCapUsd, now) {
     const levels = position.levels ?? deriveLevels(null, roundTripCostPct(config));
     const entry = position.entryMarketCapUsd;
     if (!Number.isFinite(marketCapUsd) || !Number.isFinite(entry) || entry <= 0) return null;
 
-    if (marketCapUsd <= entry * (1 - levels.stopPct)) return "stop-loss";
-
     const peak = Math.max(position.peakMarketCapUsd ?? entry, entry);
-    const locked = peak >= entry * (1 + levels.lockPct);
+    const peakGain = peak / entry - 1;
+    const gain = marketCapUsd / entry - 1;
+    // Once a trade has been up by lockPct it is not allowed to become a loss: the flat floor
+    // ratchets from "entry minus the stop" up to "entry plus what the round trip costs".
+    const locked = peakGain >= levels.lockPct;
+
+    // 1. The flat stop. It only ever moves once, and only upwards.
+    if (locked) {
+      if (marketCapUsd <= entry * (1 + levels.breakEvenPct)) {
+        // Polling is every couple of seconds, so a fast coin can gap straight through the floor.
+        // Call it what it actually was rather than claiming break-even on a losing exit.
+        return marketCapUsd >= entry ? "break-even" : "stop-loss";
+      }
+    } else if (marketCapUsd <= entry * (1 - levels.stopPct)) {
+      return "stop-loss";
+    }
+
+    // 2. The trailing take-profit, from the highest point since entry.
     const trail = locked ? levels.tightTrailPct : levels.trailPct;
     if (marketCapUsd <= peak * (1 - trail)) return locked ? "trail-locked" : "trail";
 
-    if (now - (position.lastHighAt ?? position.openedAt) >= levels.stallMs) return "stall";
-    if (now - position.openedAt >= levels.maxHoldMs) return "max-hold";
+    // 3. A trade that is not even covering its costs and has stopped making highs is not working.
+    //    One that IS in profit is left to the trail, however long it takes.
+    const inProfit = gain > levels.costPct;
+    if (!inProfit && now - (position.lastHighAt ?? position.openedAt) >= levels.stallMs) return "stall";
+
+    // 4. Backstops: measured from the last new high, so a coin still climbing keeps its position.
+    if (now - (position.lastHighAt ?? position.openedAt) >= levels.maxHoldMs) return "max-hold";
+    if (now - position.openedAt >= (levels.maxTotalHoldMs ?? 4 * 3_600_000)) return "max-hold-total";
     return null;
   }
 
@@ -324,6 +366,8 @@ export function createExecutor({ config, universe, journal, account, persist, so
     for (const [mint, position] of Object.entries(account.positions)) {
       const fresh = now - (position.lastPriceAt ?? 0) <= STALE_PRICE_MS;
       if (!fresh) {
+        // No price at all for a long time is a data problem, not a trade going quiet, so this one
+        // is measured from entry rather than from the last high.
         const levels = position.levels ?? deriveLevels(null, roundTripCostPct(config));
         if (Number.isFinite(position.lastPrice) && now - position.openedAt >= levels.maxHoldMs) {
           closePosition(mint, position.lastPrice, position.lastMarketCapUsd, "max-hold-stale");

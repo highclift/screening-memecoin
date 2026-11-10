@@ -14,6 +14,7 @@
     <script src="/humanize.js?v=plain-language-1" defer></script>
     <script src="/bots-view.js?v=plain-language-1" defer></script>
     <script src="/funnel.js?v=plain-language-1" defer></script>
+    <script src="/nav.js?v=plain-language-1" defer></script>
     <script src="/app.js?v=plain-language-1" defer></script>
   </head>
   <body>
@@ -27,7 +28,7 @@
         <nav class="side-nav" aria-label="Navigasi">
           <a class="nav-link active" href="#overview"><span class="nav-icon">◈</span> <span data-i18n="nav.overview">Ringkasan</span></a>
           <a class="nav-link" href="#bots"><span class="nav-icon">⧉</span> <span data-i18n="nav.bots">Bot</span></a>
-          <a class="nav-link" href="#story"><span class="nav-icon">↗</span> <span data-i18n="nav.activity">Aktivitas</span></a>
+          <a class="nav-link" href="#screener"><span class="nav-icon">↗</span> <span data-i18n="nav.watchlist">Daftar hijau</span></a>
           <a class="nav-link" href="#strategy"><span class="nav-icon">⌘</span> <span data-i18n="nav.strategy">Strategi</span></a>
         </nav>
         <div class="sidebar-bottom">
@@ -45,6 +46,10 @@
             <p class="top-subtitle" data-i18n="top.subtitle">Tiga bot berlatih bersama di satu halaman.</p>
           </div>
           <div class="topbar-right">
+            <div class="lang-switch" role="group" data-i18n-attr="aria-label:theme.switchLabel">
+              <button class="lang-option" type="button" data-theme-option="dark" data-i18n="theme.dark" data-i18n-attr="title:theme.dark">Gelap</button>
+              <button class="lang-option" type="button" data-theme-option="light" data-i18n="theme.light" data-i18n-attr="title:theme.light">Terang</button>
+            </div>
             <div class="lang-switch" role="group" data-i18n-attr="aria-label:lang.switchLabel">
               <button class="lang-option" type="button" data-lang="id">ID</button>
               <button class="lang-option" type="button" data-lang="en">EN</button>
@@ -70,25 +75,24 @@
           </div>
         </section>
 
-        <section class="panel story-panel" id="story" aria-live="polite" aria-atomic="false">
-          <div class="panel-heading">
-            <div><div class="eyebrow" data-i18n="now.eyebrow">SEDANG TERJADI</div><h3 data-i18n="now.title">Apa yang bot lakukan sekarang</h3></div>
-            <span class="stream-label"><span class="status-dot"></span> <span data-i18n="activity.note">Bahasa sehari-hari</span></span>
+        <section class="panel bots-panel" id="bots" aria-live="polite" aria-atomic="false">
+          <div class="bots-split">
+            <div class="bot-rows-side">
+              <div class="bot-rows" id="botRows"></div>
+              <p class="now-sentence" id="nowSentence" data-i18n="now.stopped">Bot belum berjalan.</p>
+            </div>
+            <div class="bot-log-side" id="story">
+              <div class="bot-log-head">
+                <span data-i18n="log.title">Log</span>
+                <span class="stream-label"><span class="status-dot"></span> <span data-i18n="activity.note">Bahasa sehari-hari</span></span>
+              </div>
+              <div class="story-list" id="storyList"><div class="empty-state" data-i18n="activity.empty">Cerita akan muncul di sini begitu bot dijalankan.</div></div>
+              <details class="tech-details">
+                <summary><span data-i18n="activity.technical">Detail teknis (log asli)</span> <span class="tech-caret">+</span></summary>
+                <div class="log-list" id="logList"><div class="empty-state" data-i18n="activity.technicalEmpty">Belum ada log.</div></div>
+              </details>
+            </div>
           </div>
-          <p class="now-sentence" id="nowSentence">Bot belum berjalan.</p>
-          <div class="story-list" id="storyList"><div class="empty-state" data-i18n="activity.empty">Cerita akan muncul di sini begitu bot dijalankan.</div></div>
-          <details class="tech-details">
-            <summary><span data-i18n="activity.technical">Detail teknis (log asli)</span> <span class="tech-caret">+</span></summary>
-            <div class="log-list" id="logList"><div class="empty-state" data-i18n="activity.technicalEmpty">Belum ada log.</div></div>
-          </details>
-        </section>
-
-        <section class="panel lanes-panel" id="bots">
-          <div class="panel-heading">
-            <div><div class="eyebrow" data-i18n="bots.eyebrow">RANTAI TIGA BOT</div><h3><span data-i18n="bots.title">Bot dan tugasnya</span><span class="help-mark" data-help="help.chain" tabindex="0" role="note">?</span></h3></div>
-            <span class="panel-tag muted-tag" data-i18n="bots.note">Bot 1 → bot 2 → bot 3</span>
-          </div>
-          <div class="lane-cards" id="botCards"></div>
         </section>
 
         <section class="metric-grid" aria-label="Statistik akun latihan">

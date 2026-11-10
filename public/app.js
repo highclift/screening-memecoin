@@ -90,9 +90,24 @@ function syncLangButtons() {
   }
 }
 
-for (const button of document.querySelectorAll(".lang-option")) {
+for (const button of document.querySelectorAll("[data-lang]")) {
   button.addEventListener("click", () => setLang(button.dataset.lang));
 }
+
+// ---------- appearance ----------
+function syncThemeButtons() {
+  for (const button of document.querySelectorAll("[data-theme-option]")) {
+    const active = button.dataset.themeOption === theme();
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+for (const button of document.querySelectorAll("[data-theme-option]")) {
+  button.addEventListener("click", () => setTheme(button.dataset.themeOption));
+}
+
+onThemeChange(syncThemeButtons);
 
 onLangChange(() => {
   syncLangButtons();
@@ -743,5 +758,7 @@ $("#resetButton").addEventListener("click", async () => {
 
 applyStaticText();
 syncLangButtons();
+syncThemeButtons();
+setupNav();
 refresh();
 setInterval(refresh, 1000);

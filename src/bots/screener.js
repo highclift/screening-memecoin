@@ -16,7 +16,7 @@
 // Every coin it screens goes to data/bot1-screened.jsonl. A coin is logged the first time it is
 // seen and then at most once a minute, so a few hundred coins a minute stays readable.
 
-import { DISCOVERY_JOBS, isMemecoinPool } from "../discovery.js";
+import { DISCOVERY_JOBS, DISCOVERY_PAGE_COUNT, isMemecoinPool } from "../discovery.js";
 import { createMeter } from "../meter.js";
 
 const LOG_REPEAT_MS = 60_000;
@@ -39,10 +39,13 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
   const lastLoggedAt = new Map();
   const priority = new Set(); // mints bot 3 wants watched closely
   let jobIndex = 0;
-  let cursor = 0;
   let discoveryTimer = null;
   let refreshTimer = null;
   let stopping = false;
+
+  // Coins the DexScreener rotation gets through in a minute, at the configured tick.
+  const refreshesPerMinute = () =>
+    (config.refreshBatchSize * config.refreshCallsPerTick * 60_000) / config.refreshIntervalMs;
 
   function remember(record, source) {
     recent.unshift({
@@ -136,8 +139,8 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
   }
 
   // ---------- GeckoTerminal: every pool, any age ----------
-  // One page per call. A call takes several seconds, so a tick fires a few of them at once; the
-  // shared budget, not the tick, is what keeps us under GeckoTerminal's limit.
+  // One page per call, paced by the shared budget rather than by the tick. The page is only taken
+  // off the rotation once a call is actually going out, so a paced-out tick costs nothing.
   async function sweepOnce() {
     const job = DISCOVERY_JOBS[jobIndex % DISCOVERY_JOBS.length];
     jobIndex += 1;
@@ -167,15 +170,20 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
     }
   }
 
-  // ---------- DexScreener: fresh numbers where they matter ----------
-  // Whoever is closest to a decision gets the data first: bot 3's open positions and watchlist,
-  // then the coins bot 2 has green or watching, then a slow rotation over everything recently
-  // active (so a coin the sweep only glanced at still gets a proper look).
-  function refreshTargets() {
+  // ---------- DexScreener: fresh numbers for EVERY coin we know ----------
+  // Whoever is closest to a decision gets the data first — bot 3's open positions and watchlist,
+  // then bot 2's green and watched coins — and then the rotation works through the whole registry,
+  // oldest refresh first.
+  //
+  // The rotation covering everything is the point. A coin that went quiet is exactly the coin that
+  // might wake up, so dropping it from the rotation (as this used to, after 30 minutes idle) meant
+  // only GeckoTerminal's rate-limited trending page could ever re-surface it. DexScreener costs one
+  // call per 30 coins and has never rate limited us, so there is no reason to forget anybody.
+  function refreshTargets(limit) {
     const wanted = [];
     const seen = new Set();
     const add = (mint) => {
-      if (!mint || seen.has(mint) || mint.startsWith("DEMO-")) return;
+      if (!mint || seen.has(mint) || mint.startsWith("DEMO-") || wanted.length >= limit) return;
       seen.add(mint);
       wanted.push(mint);
     };
@@ -185,33 +193,39 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
       const state = record.verdict?.state;
       if (state === "green" || state === "watch") add(record.mint);
     }
+    if (wanted.length >= limit) return wanted;
 
-    const active = [];
-    const now = Date.now();
+    // Everything else, least recently refreshed first.
+    const rest = [];
     for (const record of universe.values()) {
-      if (seen.has(record.mint)) continue;
-      if (now - record.lastSeenAt > 30 * 60_000) continue; // not traded lately: the sweep will find it again
-      active.push(record);
+      if (!seen.has(record.mint)) rest.push(record);
     }
-    if (active.length) {
-      active.sort((a, b) => (a.lastRefreshAt ?? 0) - (b.lastRefreshAt ?? 0));
-      for (const record of active) {
-        if (wanted.length >= config.refreshBatchSize) break;
-        add(record.mint);
-      }
-    }
-    cursor += 1;
-    return wanted.slice(0, config.refreshBatchSize);
+    rest.sort((a, b) => (a.lastRefreshAt ?? 0) - (b.lastRefreshAt ?? 0));
+    for (const record of rest) add(record.mint);
+    return wanted;
   }
 
   async function refreshOnce() {
-    const mints = refreshTargets();
+    const perCall = config.refreshBatchSize;
+    const mints = refreshTargets(perCall * config.refreshCallsPerTick);
     if (!mints.length) return;
+    // Sequential, not parallel: the same burst lesson as GeckoTerminal, and sequential is still
+    // thousands of coins a minute.
+    for (let i = 0; i < mints.length; i += perCall) {
+      await applySnapshots(mints.slice(i, i + perCall));
+    }
+  }
+
+  async function applySnapshots(mints) {
     const snapshots = await feed.snapshots(mints);
     const now = Date.now();
-    for (const [mint, snap] of snapshots) {
+    // Mark everything asked for, not just what came back: a coin DexScreener does not know about
+    // must not be retried on every single tick forever.
+    for (const mint of mints) {
       const record = universe.get(mint);
       if (record) record.lastRefreshAt = now;
+    }
+    for (const [mint, snap] of snapshots) {
       stats.refreshed += 1;
       const buys = Number.isFinite(snap.buysH1) ? snap.buysH1 : null;
       screen({
@@ -281,20 +295,21 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
     },
 
     start() {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const discoveryLoop = async () => {
+      // The tick only asks "may I?"; the budget answers, and it spaces the calls evenly. A call can
+      // take several seconds, so the next one is allowed to start while the last is still in the
+      // air — up to maxSweepsInFlight, which is the only thing this loop itself limits.
+      let sweepsInFlight = 0;
+      const discoveryLoop = () => {
         if (stopping) return;
-        try {
-          // Staggered rather than fired together: GeckoTerminal tolerates the per-minute rate but
-          // answers a burst of simultaneous calls with a 429, which costs a minute of backoff.
-          await Promise.all(Array.from({ length: config.sweepConcurrency }, async (_, index) => {
-            if (index) await sleep(index * 300);
-            return sweepOnce();
-          }));
-        } catch (error) {
-          log(`[bot1] sweep error: ${error.message}`);
+        if (sweepsInFlight < config.maxSweepsInFlight && feed.canSweep()) {
+          sweepsInFlight += 1;
+          sweepOnce()
+            .catch((error) => log(`[bot1] sweep error: ${error.message}`))
+            .finally(() => {
+              sweepsInFlight -= 1;
+            });
         }
-        if (!stopping) discoveryTimer = setTimeout(discoveryLoop, config.discoveryTickMs);
+        discoveryTimer = setTimeout(discoveryLoop, config.discoveryTickMs);
       };
       let buyerTurn = 0;
       const refreshLoop = async () => {
@@ -312,7 +327,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
       };
       discoveryTimer = setTimeout(discoveryLoop, 1000);
       refreshTimer = setTimeout(refreshLoop, 2000);
-      log(`[bot1] Screening every coin, any age: ${DISCOVERY_JOBS.length} GeckoTerminal pages round-robin, ${config.sweepConcurrency} pages every ${config.discoveryTickMs / 1000}s (budget ${config.geckoCallsPerMinute}/min) + ${config.refreshBatchSize} coins refreshed every ${config.refreshIntervalMs / 1000}s. Log: data/bot1-screened.jsonl`);
+      log(`[bot1] Screening every coin, any age: ${DISCOVERY_PAGE_COUNT} GeckoTerminal pages round-robin at ${config.geckoCallsPerMinute} calls/min, evenly paced + every known coin re-checked on DexScreener at ${Math.round(refreshesPerMinute())} coins/min. Log: data/bot1-screened.jsonl`);
     },
 
     stop() {
@@ -327,7 +342,12 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
         perMinute: meter.perMinute(), // sightings a minute (a coin looked at twice counts twice)
         newPerMinute: newMeter.perMinute(), // coins seen for the first time, a minute
         universeSize: universe.size,
+        // How long it takes the rotation to come back round to any given coin: the honest answer
+        // to "how fast would we notice an old coin waking up?".
+        recheckSeconds: Math.round(universe.size / Math.max(1, refreshesPerMinute()) * 60),
         geckoCallsLastMinute: feed.geckoCallsUsed(),
+        geckoRate: feed.geckoRate?.() ?? null, // the rate the feed settled on, not the ceiling
+        geckoPausedForMs: feed.geckoPausedForMs?.() ?? 0,
         sources: { ...sources },
         recent: recent.slice(0, 25),
       };

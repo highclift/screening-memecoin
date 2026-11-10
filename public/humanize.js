@@ -117,11 +117,13 @@ function classifyFeedPayload(raw) {
 
 const EXIT_KEY = {
   "stop-loss": "ev.exit.stopLoss",
+  "break-even": "ev.exit.breakEven",
   trail: "ev.exit.trail",
   "trail-locked": "ev.exit.trailLocked",
   stall: "ev.exit.stall",
   breakdown: "ev.exit.breakdown",
   "max-hold": "ev.exit.maxHold",
+  "max-hold-total": "ev.exit.maxHoldTotal",
   "max-hold-stale": "ev.exit.stale",
 };
 
@@ -145,9 +147,9 @@ const MATCHERS = [
   [/^\[shutdown\]/i, () => ({ key: "ev.shutdown", params: {}, tone: "muted", icon: "■" })],
 
   // ---------- bot 1: screening ----------
-  [/^\[bot1\] Screening every coin, any age: (\d+) GeckoTerminal pages round-robin every ([\d.]+)s \+ (\d+) coins refreshed every ([\d.]+)s/i, (m) => ({
+  [/^\[bot1\] Screening every coin, any age: (\d+) GeckoTerminal pages round-robin at (\d+) calls\/min, evenly paced \+ every known coin re-checked on DexScreener at (\d+) coins\/min/i, (m) => ({
     key: "ev.bot1.started",
-    params: { pages: m[1], seconds: m[2], batch: m[3], refresh: m[4] },
+    params: { pages: m[1], rate: m[2], recheck: m[3] },
     tone: "info",
     icon: "◎",
     bot: "screener",
@@ -196,6 +198,29 @@ const MATCHERS = [
   }],
 
   // ---------- worker: feed ----------
+  // Being rate limited is a speed limit, not a failure: the other sources keep going, so this is a
+  // calm one-line notice rather than a red error.
+  [/^\[feed\] GeckoTerminal rate limited; pausing coin discovery for (\d+)s and slowing to (\d+) calls\/min/i, (m) => ({
+    key: "ev.geckoPaused",
+    params: { seconds: m[1], rate: m[2] },
+    tone: "warn",
+    icon: "⏸",
+    bot: "screener",
+  })],
+  [/^\[feed\] GeckoTerminal back at full speed \((\d+) calls\/min\)/i, (m) => ({
+    key: "ev.geckoRecovered",
+    params: { rate: m[1] },
+    tone: "good",
+    icon: "⚡",
+    bot: "screener",
+  })],
+  [/^\[feed\] GeckoTerminal (\w+) page (\d+) failed: (.+)$/i, (m) => ({
+    key: "ev.geckoPageFailed",
+    params: { page: m[2], detail: m[3] },
+    tone: "warn",
+    icon: "⚠",
+    bot: "screener",
+  })],
   [/^\[feed\] PumpPortal connected/i, () => ({ key: "ev.feedConnected", params: {}, tone: "good", icon: "⚡" })],
   [/^\[feed\] PumpPortal disconnected; reconnecting in (\d+)s/i, (m) => ({
     key: "ev.feedDisconnected",
