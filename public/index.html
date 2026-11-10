@@ -12,7 +12,7 @@
     <script src="/i18n.js?v=plain-language-1" defer></script>
     <script src="/anim.js?v=plain-language-1" defer></script>
     <script src="/humanize.js?v=plain-language-1" defer></script>
-    <script src="/lanes-view.js?v=plain-language-1" defer></script>
+    <script src="/bots-view.js?v=plain-language-1" defer></script>
     <script src="/funnel.js?v=plain-language-1" defer></script>
     <script src="/app.js?v=plain-language-1" defer></script>
   </head>
@@ -26,7 +26,7 @@
         <div class="side-caption" data-i18n="side.caption">TERMINAL PAPER</div>
         <nav class="side-nav" aria-label="Navigasi">
           <a class="nav-link active" href="#overview"><span class="nav-icon">◈</span> <span data-i18n="nav.overview">Ringkasan</span></a>
-          <a class="nav-link" href="#lanes"><span class="nav-icon">⧉</span> <span data-i18n="nav.bots">Bot</span></a>
+          <a class="nav-link" href="#bots"><span class="nav-icon">⧉</span> <span data-i18n="nav.bots">Bot</span></a>
           <a class="nav-link" href="#story"><span class="nav-icon">↗</span> <span data-i18n="nav.activity">Aktivitas</span></a>
           <a class="nav-link" href="#strategy"><span class="nav-icon">⌘</span> <span data-i18n="nav.strategy">Strategi</span></a>
         </nav>
@@ -83,12 +83,12 @@
           </details>
         </section>
 
-        <section class="panel lanes-panel" id="lanes">
+        <section class="panel lanes-panel" id="bots">
           <div class="panel-heading">
-            <div><div class="eyebrow" data-i18n="lanes.eyebrow">TIGA BOT</div><h3><span data-i18n="lanes.title">Bot dan tugasnya</span><span class="help-mark" data-help="help.lane" tabindex="0" role="note">?</span></h3></div>
-            <span class="panel-tag muted-tag" data-i18n="lanes.note">Masing-masing punya saldo sendiri</span>
+            <div><div class="eyebrow" data-i18n="bots.eyebrow">RANTAI TIGA BOT</div><h3><span data-i18n="bots.title">Bot dan tugasnya</span><span class="help-mark" data-help="help.chain" tabindex="0" role="note">?</span></h3></div>
+            <span class="panel-tag muted-tag" data-i18n="bots.note">Bot 1 → bot 2 → bot 3</span>
           </div>
-          <div class="lane-cards" id="laneCards"></div>
+          <div class="lane-cards" id="botCards"></div>
         </section>
 
         <section class="metric-grid" aria-label="Statistik akun latihan">
@@ -130,34 +130,34 @@
 
         <section class="panel screener-panel" id="screener">
           <div class="panel-heading">
-            <div><div class="eyebrow" data-i18n="screener.eyebrow">DAFTAR AWASAN</div><h3 data-i18n="screener.title">Koin yang sedang dinilai</h3></div>
-            <div class="screener-total"><span class="screener-state-pill" id="screenerState">BOT BERHENTI</span><strong id="screenerActiveCount">0</strong><span data-i18n="screener.countMiddle">koin dinilai dari</span><strong id="screenerCapacity">500</strong></div>
+            <div><div class="eyebrow" data-i18n="screener.eyebrow">HASIL SARINGAN BOT 2</div><h3 data-i18n="screener.title">Koin yang berpotensi pump</h3></div>
+            <div class="screener-total"><span class="screener-state-pill" id="screenerState">BOT BERHENTI</span><strong id="screenerActiveCount">0</strong><span data-i18n="screener.countMiddle">koin hijau dari maksimum</span><strong id="screenerCapacity">60</strong></div>
           </div>
           <div class="screener-stats">
-            <div><span data-i18n="screener.found">Koin ditemukan</span><strong id="screenScanned">0</strong></div>
-            <div><span data-i18n="screener.filtered">Tidak lolos saringan</span><strong id="screenRejected">0</strong></div>
-            <div><span data-i18n="screener.entered">Dibeli (latihan)</span><strong id="screenEntered">0</strong></div>
-            <div><span data-i18n="screener.expiredStat">Kehabisan waktu</span><strong id="screenExpired">0</strong></div>
+            <div><span data-i18n="screener.screened">Koin di-screening bot 1</span><strong id="statScreened">0</strong></div>
+            <div><span data-i18n="screener.perMinute">Koin per menit</span><strong id="statPerMinute">0</strong></div>
+            <div><span data-i18n="screener.rejected">Ditolak bot 2</span><strong id="statRejected">0</strong></div>
+            <div><span data-i18n="screener.bought">Dibeli bot 3 (latihan)</span><strong id="statBought">0</strong></div>
           </div>
           <div class="screener-content">
             <div class="candidate-section">
-              <div class="screener-subheading"><strong data-i18n="screener.candidates">Daftar awasan</strong><span data-i18n="screener.candidatesNote">40 terbaru</span></div>
+              <div class="screener-subheading"><strong data-i18n="screener.greenList">Daftar hijau</strong><span data-i18n="screener.greenNote">skor tertinggi dulu</span></div>
               <div class="table-wrap screener-table-wrap">
                 <table class="screener-table">
                   <thead><tr>
                     <th data-i18n="th.token">Koin</th>
-                    <th data-i18n="th.bot">Bot</th>
-                    <th data-i18n="th.waitingFor">Sedang menunggu</th>
-                    <th data-i18n="th.activity">Transaksi / beli / pembeli</th>
-                    <th data-i18n="th.marketCap">Market cap USD</th>
                     <th data-i18n="th.age">Umur</th>
+                    <th data-i18n="th.score">Skor &amp; alasan</th>
+                    <th data-i18n="th.surge">Volume vs jam biasanya</th>
+                    <th data-i18n="th.marketCap">Market cap USD</th>
+                    <th data-i18n="th.bot3">Bot 3</th>
                   </tr></thead>
                   <tbody id="screenerBody"></tbody>
                 </table>
               </div>
             </div>
             <div class="screener-debug-section">
-              <div class="screener-subheading"><strong><span data-i18n="funnel.title">Mengapa koin gugur</span><span class="help-mark" data-help="help.funnel" tabindex="0" role="note">?</span></strong><span data-i18n="funnel.note">sejak bot dijalankan</span></div>
+              <div class="screener-subheading"><strong><span data-i18n="funnel.title">Mengapa koin ditolak</span><span class="help-mark" data-help="help.funnel" tabindex="0" role="note">?</span></strong><span data-i18n="funnel.note">sejak bot dijalankan</span></div>
               <div class="screener-debug-list" id="funnelList"></div>
             </div>
           </div>
@@ -185,55 +185,21 @@
                 </div>
 
                 <div class="field-section">
-                  <div class="field-section-title" data-i18n="form.sizeTitle">Ukuran simulasi</div>
+                  <div class="field-section-title" data-i18n="form.moneyTitle">Batas uang</div>
                   <div class="field-grid two-col">
                     <label><span data-i18n="form.startBalance">Saldo awal</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="paperStartBalanceSol" type="number" min="0.000001" step="any" value="1" /></label>
                     <label><span data-i18n="form.buyAmount">Uang per pembelian</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="buyAmountSol" type="number" min="0.000001" step="any" value="0.01" /></label>
                     <label><span data-i18n="form.maxOpen">Posisi bersamaan</span><input class="number-input settings-input" name="maxOpenPositions" type="number" min="1" max="100" step="1" value="3" /></label>
                     <label><span data-i18n="form.maxEntries">Batas beli per hari</span><input class="number-input settings-input" name="maxEntriesPerDay" type="number" min="1" max="10000" step="1" value="20" /></label>
+                    <label><span data-i18n="form.maxDailyLoss">Batas rugi harian</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="maxDailyLossSol" type="number" min="0" step="any" value="0.05" /></label>
                   </div>
                   <div class="inline-note" data-i18n="form.sizeNote">Saldo awal hanya berlaku saat reset akun latihan.</div>
                 </div>
 
                 <div class="field-section">
-                  <div class="field-section-title" data-i18n="form.filterTitle">Saringan koin</div>
-                  <div class="field-grid two-col">
-                    <label><span data-i18n="form.minMc">Market cap minimum</span><span class="unit" data-i18n="unit.usd">USD</span><input class="number-input settings-input" name="minMarketCapUsd" type="number" min="0" step="any" value="40000" /></label>
-                    <label><span data-i18n="form.maxMc">Market cap maksimum</span><span class="unit" data-i18n="unit.usd">USD</span><input class="number-input settings-input" name="maxMarketCapUsd" type="number" min="0.000001" step="any" value="160000" /></label>
-                    <label><span data-i18n="form.minTrades">Transaksi minimum</span><input class="number-input settings-input" name="minTrades" type="number" min="1" step="1" value="25" /></label>
-                    <label><span data-i18n="form.minBuys">Pembelian minimum</span><input class="number-input settings-input" name="minBuys" type="number" min="1" step="1" value="14" /></label>
-                    <label><span data-i18n="form.minBuyers">Pembeli berbeda minimum</span><span class="help-mark" data-help="help.uniqueBuyers" tabindex="0" role="note">?</span><input class="number-input settings-input" name="minUniqueBuyers" type="number" min="1" step="1" value="8" /></label>
-                    <label><span data-i18n="form.maxAge">Umur maksimum kandidat</span><span class="unit" data-i18n="unit.seconds">detik</span><input class="number-input settings-input" name="maxCandidateAgeSeconds" type="number" min="1" step="1" value="240" /></label>
-                    <label><span data-i18n="form.socialMode">Syarat tautan sosial</span><select class="number-input settings-input" name="socialMode">
-                      <option value="twitter" selected data-i18n="form.social.twitter">Wajib ada X/Twitter</option>
-                      <option value="any" data-i18n="form.social.any">Minimal satu tautan</option>
-                      <option value="multiple" data-i18n="form.social.multiple">Minimal dua jenis tautan</option>
-                      <option value="off" data-i18n="form.social.off">Tanpa saringan sosial</option>
-                    </select></label>
-                  </div>
-                  <div class="inline-note" data-i18n="form.socialNote">X/Twitter, Telegram, dan situs web dihitung sebagai jenis berbeda.</div>
+                  <div class="field-section-title" data-i18n="form.decideTitle">Yang diputuskan bot sendiri</div>
+                  <div class="inline-note" data-i18n="form.decideNote">Bot 2 menilai koin mana yang berpotensi pump; bot 3 mengukur ayunan harga tiap koin lalu menentukan sendiri kapan masuk, stop, dan jual. Tidak ada angka strategi untuk diatur di sini.</div>
                 </div>
-
-                <div class="field-section">
-                  <div class="field-section-title" data-i18n="form.exitTitle">Kapan beli dan jual</div>
-                  <div class="field-grid two-col">
-                    <label><span data-i18n="form.pullback">Turun dari puncak</span><span class="help-mark" data-help="help.pullback" tabindex="0" role="note">?</span><span class="unit" data-i18n="unit.pct">%</span><input class="number-input settings-input" name="pullbackPct" type="number" min="0.1" max="95" step="any" value="20" /></label>
-                    <label><span data-i18n="form.bounce">Memantul dari titik rendah</span><span class="help-mark" data-help="help.rebound" tabindex="0" role="note">?</span><span class="unit" data-i18n="unit.pct">%</span><input class="number-input settings-input" name="bouncePct" type="number" min="0.1" max="200" step="any" value="5" /></label>
-                    <label><span data-i18n="form.takeProfit">Target untung</span><span class="unit" data-i18n="unit.pct">%</span><input class="number-input settings-input" name="takeProfitPct" type="number" min="0.1" step="any" value="10" /></label>
-                    <label><span data-i18n="form.stopLoss">Batas rugi</span><span class="unit" data-i18n="unit.pct">%</span><input class="number-input settings-input" name="stopLossPct" type="number" min="0.1" max="99" step="any" value="15" /></label>
-                    <label><span data-i18n="form.maxHold">Lama maksimum memegang</span><span class="unit" data-i18n="unit.seconds">detik</span><input class="number-input settings-input" name="maxHoldSeconds" type="number" min="1" step="1" value="180" /></label>
-                    <label><span data-i18n="form.maxDailyLoss">Batas rugi harian</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="maxDailyLossSol" type="number" min="0" step="any" value="0.05" /></label>
-                  </div>
-                </div>
-
-                <details class="advanced-settings">
-                  <summary><span data-i18n="form.advanced">Pengaturan lanjutan</span> <span>+</span></summary>
-                  <div class="field-grid two-col advanced-grid">
-                    <label><span data-i18n="form.maxActive">Isi maksimum daftar awasan</span><input class="number-input settings-input" name="maxActiveCandidates" type="number" min="1" step="1" value="500" /></label>
-                    <label><span data-i18n="form.fee">Fee simulasi</span><span class="unit" data-i18n="unit.bps">bps / sisi</span><input class="number-input settings-input" name="paperFeeBps" type="number" min="0" max="5000" step="1" value="100" /></label>
-                    <label><span data-i18n="form.slippage">Slippage simulasi</span><span class="unit" data-i18n="unit.bps">bps / sisi</span><input class="number-input settings-input" name="paperSlippageBps" type="number" min="0" max="5000" step="1" value="200" /></label>
-                  </div>
-                </details>
 
                 <div class="form-actions">
                   <button class="button button-primary" id="startButton" type="submit"><span>▶</span> <span data-i18n="form.start">Mulai paper scanner</span></button>

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./src/config.js";
+import { freshState } from "./src/state.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const STATE_PATH = path.join(ROOT, "data", "paper-state.json");
@@ -13,51 +14,28 @@ const PORT = Number(process.env.WEB_PORT ?? 3000);
 const HOST = "127.0.0.1";
 const app = express();
 
+// Money limits are the only settings left: bot 2 and bot 3 decide the rest from the coins
+// themselves (see src/signals.js), so there is nothing else for the dashboard to ask for.
 const DEFAULT_SETTINGS = {
-  socialMode: "twitter",
   paperStartBalanceSol: 1,
   buyAmountSol: 0.01,
   maxOpenPositions: 3,
   maxEntriesPerDay: 20,
-  maxActiveCandidates: 500,
-  minMarketCapUsd: 40_000,
-  maxMarketCapUsd: 160_000,
-  minTrades: 25,
-  minBuys: 14,
-  minUniqueBuyers: 8,
-  maxCandidateAgeSeconds: 240,
-  pullbackPct: 0.2,
-  bouncePct: 0.05,
-  takeProfitPct: 0.1,
-  stopLossPct: 0.15,
-  maxHoldSeconds: 180,
-  paperFeeBps: 100,
-  paperSlippageBps: 200,
   maxDailyLossSol: 0.05,
 };
 
 const SETTINGS_TO_ENV = {
-  socialMode: "SOCIAL_MODE",
   paperStartBalanceSol: "PAPER_START_BALANCE_SOL",
   buyAmountSol: "BUY_AMOUNT_SOL",
   maxOpenPositions: "MAX_OPEN_POSITIONS",
   maxEntriesPerDay: "MAX_ENTRIES_PER_DAY",
-  maxActiveCandidates: "MAX_ACTIVE_CANDIDATES",
-  minMarketCapUsd: "MIN_MARKET_CAP_USD",
-  maxMarketCapUsd: "MAX_MARKET_CAP_USD",
-  minTrades: "MIN_TRADES",
-  minBuys: "MIN_BUYS",
-  minUniqueBuyers: "MIN_UNIQUE_BUYERS",
-  maxCandidateAgeSeconds: "MAX_CANDIDATE_AGE_SECONDS",
-  pullbackPct: "PULLBACK_PCT",
-  bouncePct: "BOUNCE_PCT",
-  takeProfitPct: "TAKE_PROFIT_PCT",
-  stopLossPct: "STOP_LOSS_PCT",
-  maxHoldSeconds: "MAX_HOLD_SECONDS",
-  paperFeeBps: "PAPER_FEE_BPS",
-  paperSlippageBps: "PAPER_SLIPPAGE_BPS",
   maxDailyLossSol: "MAX_DAILY_LOSS_SOL",
 };
+
+// Fill realism, env-only (PAPER_FEE_BPS / PAPER_SLIPPAGE_BPS): the same numbers the worker uses to
+// value an open position.
+const FEE_BPS = Number(process.env.PAPER_FEE_BPS ?? 100);
+const SLIPPAGE_BPS = Number(process.env.PAPER_SLIPPAGE_BPS ?? 200);
 
 let worker = null;
 let workerStatus = "stopped";
@@ -67,16 +45,10 @@ let feedSource = null;
 let sessionApiKey = "";
 let activeSettings = { ...DEFAULT_SETTINGS };
 const recentLogs = [];
-let screenerStatus = {
-  scanned: 0,
-  rejected: 0,
-  entered: 0,
-  expired: 0,
-  activeCount: 0,
-  maxActive: DEFAULT_SETTINGS.maxActiveCandidates,
-  candidates: [],
-  updatedAt: null,
-};
+
+// What the three bots report. Empty until the worker publishes its first status.
+const emptyStatus = () => ({ bots: null, updatedAt: null });
+let screenerStatus = emptyStatus();
 const screenerDebug = [];
 
 function configuredApiKey() {
@@ -139,8 +111,8 @@ function readPaperState() {
 }
 
 function positionSnapshot(position) {
-  const fee = activeSettings.paperFeeBps / 10_000;
-  const slippage = activeSettings.paperSlippageBps / 10_000;
+  const fee = FEE_BPS / 10_000;
+  const slippage = SLIPPAGE_BPS / 10_000;
   const estimate = position.tokenQuantity * position.lastPrice * (1 - slippage) * (1 - fee);
   return {
     mint: position.mint,
@@ -188,19 +160,9 @@ function parseSettings(input = {}) {
   const settings = { ...DEFAULT_SETTINGS };
   for (const [name, fallback] of Object.entries(DEFAULT_SETTINGS)) {
     const value = input[name] ?? fallback;
-    if (name === "socialMode") {
-      if (typeof value !== "string" || !["off", "any", "multiple", "twitter"].includes(value)) {
-        throw new Error("socialMode must be off, any, multiple, or twitter.");
-      }
-      settings[name] = value;
-      continue;
-    }
-    if (typeof value === "number" || typeof value === "string") {
-      settings[name] = Number(value);
-    } else {
-      throw new Error(`${name} doit être numérique.`);
-    }
-    if (!Number.isFinite(settings[name])) throw new Error(`${name} doit être un nombre valide.`);
+    if (typeof value !== "number" && typeof value !== "string") throw new Error(`${name} must be a number.`);
+    settings[name] = Number(value);
+    if (!Number.isFinite(settings[name])) throw new Error(`${name} must be a valid number.`);
   }
   return settings;
 }
@@ -224,17 +186,7 @@ app.post("/api/start", (req, res) => {
 
   recentLogs.length = 0;
   screenerDebug.length = 0;
-  screenerStatus = {
-    scanned: 0,
-    rejected: 0,
-    entered: 0,
-    expired: 0,
-    activeCount: 0,
-    maxActive: DEFAULT_SETTINGS.maxActiveCandidates,
-    candidates: [],
-    phase: "starting",
-    updatedAt: null,
-  };
+  screenerStatus = { ...emptyStatus(), phase: "starting" };
   addLog("[debug] Permintaan start diterima dashboard.");
   addScreenerDebug("info", "Permintaan start diterima; memvalidasi strategi dan membuat worker paper.");
   try {
@@ -324,7 +276,7 @@ app.post("/api/start", (req, res) => {
       feedConnected = false;
       workerStatus = code === 0 || signal === "SIGTERM" ? "stopped" : "error";
       sessionApiKey = "";
-      screenerStatus = { ...screenerStatus, activeCount: 0, candidates: [], updatedAt: new Date().toISOString() };
+      screenerStatus = { ...emptyStatus(), updatedAt: new Date().toISOString() };
       addLog(`[debug] Worker exit: code=${code ?? "null"}, signal=${signal ?? "none"}.`);
       if (workerStatus === "error") {
         addLog("Bot berhenti karena error; periksa pesan worker stderr di atas.");
@@ -384,14 +336,7 @@ app.post("/api/reset-account", (req, res) => {
   if (!Number.isFinite(balance) || balance <= 0 || balance > 1_000_000) {
     return res.status(400).json({ error: "Saldo awal harus lebih besar dari 0 SOL." });
   }
-  const state = {
-    balanceSol: balance,
-    positions: {},
-    seenMints: [],
-    screenedMigrationMints: [],
-    closedTrades: [],
-    daily: { day: new Date().toISOString().slice(0, 10), entries: 0, realizedPnlSol: 0 },
-  };
+  const state = freshState(balance);
   fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
   fs.writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   activeSettings.paperStartBalanceSol = balance;

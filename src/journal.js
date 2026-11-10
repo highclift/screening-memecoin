@@ -35,6 +35,7 @@ export function createJournal({
   }
 
   return {
+    filePath,
     write(entry) {
       buffer.push(`${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`);
       if (buffer.length > MAX_BUFFERED) buffer.splice(0, buffer.length - MAX_BUFFERED);

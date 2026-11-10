@@ -174,12 +174,6 @@ h1 { margin: 5px 0 3px; font: 700 25px var(--display); letter-spacing: -.9px; }
 .field-grid label { position: relative; display: block; min-width: 0; color: #9aa195; font-size: 10px; }
 .field-grid label > span.unit { float: right; color: #666e62; font: 9px var(--mono); }
 .inline-note { margin-top: 8px; color: #767d72; font-size: 9px; line-height: 1.5; }
-.advanced-settings { margin-top: 17px; border-top: 1px solid #282d27; }
-.advanced-settings summary { display: flex; justify-content: space-between; padding: 12px 0 4px; color: #a2a89e; cursor: pointer; font-size: 10px; list-style: none; }
-.advanced-settings summary::-webkit-details-marker { display: none; }
-.advanced-settings summary span { color: var(--lime); font: 14px var(--mono); }
-.advanced-settings[open] summary span { transform: rotate(45deg); }
-.advanced-grid { padding-top: 12px; }
 .form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 18px; }
 .form-actions .button-primary { flex: 1; min-width: 190px; }
 .form-message { min-height: 17px; margin-top: 8px; color: #9ca694; font-size: 10px; }
@@ -313,8 +307,8 @@ td:last-child .trade-mint { margin-left: auto; text-align: right; }
 .story-meta { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; white-space: nowrap; }
 .story-time { color: #697166; font: 9px var(--mono); }
 .story-lane { padding: 2px 6px; border: 1px solid #3a4430; border-radius: 4px; color: #a9bb8c; background: #222a1c; font: 500 8px var(--mono); letter-spacing: .4px; }
-.story-lane[data-lane="young"] { border-color: #3c3a53; color: var(--violet); background: #262338; }
-.story-lane[data-lane="veteran"] { border-color: #4d422c; color: var(--amber); background: #2c2619; }
+.story-lane[data-bot="filter"] { border-color: #3c3a53; color: var(--violet); background: #262338; }
+.story-lane[data-bot="executor"] { border-color: #4d422c; color: var(--amber); background: #2c2619; }
 .story-row.tone-good .story-icon { border-color: #3f5129; color: var(--lime); background: #212a18; }
 .story-row.tone-good .story-text { color: #dcebc4; }
 .story-row.tone-bad .story-icon { border-color: #5e3a37; color: var(--red); background: #2a1b19; }
@@ -333,7 +327,7 @@ td:last-child .trade-mint { margin-left: auto; text-align: right; }
 .tech-details[open] .tech-caret { transform: rotate(45deg); }
 .startup-body .tech-details { margin-top: 10px; margin-right: -18px; margin-left: -18px; }
 
-/* ---------- per-lane cards ---------- */
+/* ---------- the three bot cards ---------- */
 .lanes-panel { margin-top: 15px; }
 .lane-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 15px 18px 17px; }
 .lane-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); transition: border-color .2s ease, opacity .2s ease; }
@@ -341,8 +335,8 @@ td:last-child .trade-mint { margin-left: auto; text-align: right; }
 .lane-card.is-off { opacity: .62; }
 .lane-head { display: flex; align-items: center; gap: 9px; }
 .lane-icon { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid #39422e; border-radius: 8px; color: var(--lime); background: #242a1e; font-size: 13px; }
-.lane-card[data-lane="young"] .lane-icon { border-color: #3c3a53; color: var(--violet); background: #262338; }
-.lane-card[data-lane="veteran"] .lane-icon { border-color: #4d422c; color: var(--amber); background: #2c2619; }
+.lane-card[data-bot="filter"] .lane-icon { border-color: #3c3a53; color: var(--violet); background: #262338; }
+.lane-card[data-bot="executor"] .lane-icon { border-color: #4d422c; color: var(--amber); background: #2c2619; }
 .lane-titles { min-width: 0; }
 .lane-name { display: block; color: #dfe4d8; font: 700 12px var(--display); }
 .lane-age { display: block; margin-top: 2px; color: #7d856f; font: 9px var(--mono); }
@@ -361,10 +355,14 @@ td:last-child .trade-mint { margin-left: auto; text-align: right; }
 .lane-details summary { padding: 9px 0 2px; color: #949b8e; font-size: 9px; cursor: pointer; list-style: none; }
 .lane-details summary::-webkit-details-marker { display: none; }
 .lane-details summary:hover { color: var(--lime); }
-.lane-thresholds { display: grid; gap: 1px; margin-top: 7px; }
-.lane-threshold { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 5px 0; border-bottom: 1px dashed #272c26; color: #7e8678; font-size: 9px; }
-.lane-threshold:last-child { border-bottom: 0; }
-.lane-threshold strong { color: #c2c9b9; font: 500 9px var(--mono); text-align: right; }
+/* What each card lists behind its toggle: bot 1 the coins it just screened, bot 2 the coins it just
+   turned green, bot 3 what it is waiting for. Same row shape for all three. */
+.bot-detail-list { display: grid; gap: 1px; margin-top: 7px; max-height: 178px; overflow-y: auto; }
+.bot-detail-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 5px 0; border-bottom: 1px dashed #272c26; }
+.bot-detail-row:last-child { border-bottom: 0; }
+.bot-detail-name { min-width: 0; color: #c2c9b9; font: 500 9px var(--mono); overflow-wrap: anywhere; }
+.bot-detail-meta { flex: 0 1 auto; color: #7e8678; font-size: 9px; text-align: right; }
+.bot-detail-list .empty-state { padding: 8px 0; font-size: 9px; }
 
 /* ---------- watchlist stage + funnel ---------- */
 .stage-head { display: block; color: #cfd6c4; font-size: 10px; font-family: var(--sans); }

@@ -1,23 +1,11 @@
-// Funnel panel for the watchlist: why coins dropped out, and how many were fully scored.
-// app.js calls renderFunnel(status) from renderScreener(). Builds its own DOM inside #screener
-// and reuses the existing dashboard CSS classes.
-
-// Rejection categories come from recordReject() in src/index.js; expiry categories arrive as
-// "expired:<stageKey>" and reuse the stage dictionary.
-function funnelLabel(category) {
-  if (category.startsWith("expired:")) {
-    const stageKey = category.slice("expired:".length);
-    const stage = t(`stage.${stageKey}`);
-    return t("funnel.expired", { stage: (stage === `stage.${stageKey}` ? stageKey : stage).toLowerCase() });
-  }
-  const label = t(`funnel.${category}`);
-  return label === `funnel.${category}` ? category : label;
-}
+// Why bot 2 turned coins down, and how much of its work the numbers account for.
+// app.js calls renderFunnel(status) from renderScreener(). Builds its own DOM inside #screener and
+// reuses the existing dashboard CSS classes.
 
 const FUNNEL_TILES = [
-  ["funnel.scored", "funnelScored"],
-  ["funnel.scoreBlocked", "funnelScoreBlocked"],
-  ["funnel.devUnknown", "funnelDevUnknown"],
+  ["funnel.judged", "funnelJudged"],
+  ["funnel.watching", "funnelWatching"],
+  ["funnel.rugs", "funnelRugs"],
   ["funnel.holderCheck", "funnelHolderCheck"],
 ];
 
@@ -48,15 +36,16 @@ function ensureFunnelTiles() {
 
 function renderFunnel(status = {}) {
   if (!ensureFunnelTiles()) return;
-  setNumber(document.querySelector("#funnelScored"), status.scored ?? 0, fmtInt);
-  setNumber(document.querySelector("#funnelScoreBlocked"), status.scoreBlocked ?? 0, fmtInt);
-  setNumber(document.querySelector("#funnelDevUnknown"), status.devUnknown ?? 0, fmtInt);
-  setText(document.querySelector("#funnelHolderCheck"), status.holderCheck ? t("funnel.on") : t("funnel.off"));
+  const filter = status.bots?.filter ?? {};
+  setNumber(document.querySelector("#funnelJudged"), filter.evaluated ?? 0, fmtInt);
+  setNumber(document.querySelector("#funnelWatching"), filter.watch ?? 0, fmtInt);
+  setNumber(document.querySelector("#funnelRugs"), filter.rugs ?? 0, fmtInt);
+  setText(document.querySelector("#funnelHolderCheck"), filter.holderCheck ? t("funnel.on") : t("funnel.off"));
 
   const list = document.querySelector("#funnelList");
   if (!list) return;
   list.replaceChildren();
-  const rows = Object.entries(status.funnel ?? {}).sort((a, b) => b[1] - a[1]);
+  const rows = Object.entries(filter.categories ?? {}).sort((a, b) => b[1] - a[1]);
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -64,7 +53,7 @@ function renderFunnel(status = {}) {
     list.append(empty);
     return;
   }
-  const scanned = Math.max(Number(status.scanned ?? 0), 1);
+  const judged = Math.max(Number(filter.evaluated ?? 0), 1);
   for (const [category, count] of rows) {
     const row = document.createElement("div");
     row.className = "screener-debug-row info";
@@ -73,7 +62,7 @@ function renderFunnel(status = {}) {
     countCell.textContent = fmtInt(count);
     const label = document.createElement("span");
     label.className = "screener-debug-message";
-    label.textContent = `${funnelLabel(category)} — ${t("funnel.share", { pct: ((count / scanned) * 100).toFixed(0) })}`;
+    label.textContent = `${categoryLabel(category)} — ${t("funnel.share", { pct: ((count / judged) * 100).toFixed(0) })}`;
     row.append(countCell, label);
     list.append(row);
   }

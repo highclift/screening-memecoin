@@ -1,7 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const strategyForm = $("#strategyForm");
 const messageBox = $("#formMessage");
-const percentageFields = new Set(["pullbackPct", "bouncePct", "takeProfitPct", "stopLossPct"]);
 
 let settingsSnapshot = "";
 let refreshing = false;
@@ -105,30 +104,23 @@ onLangChange(() => {
   renderStory(lastServerLogs);
   renderTechnicalLog(lastServerLogs, lastScreenerDebug);
   renderNowHeadline(lastRuntimeSnapshot, lastScreenerSnapshot);
-  renderLaneCards(lastScreenerSnapshot, lastRuntimeSnapshot);
+  renderBotCards(lastScreenerSnapshot, lastRuntimeSnapshot);
   refresh();
 });
 
+// Only money limits are left in the form: every strategy number is decided by bot 2 and bot 3.
 function applySettings(settings) {
   for (const [name, rawValue] of Object.entries(settings ?? {})) {
     const input = strategyForm.elements.namedItem(name);
     if (!input || document.activeElement === input) continue;
-    const value = percentageFields.has(name) ? Number(rawValue) * 100 : rawValue;
-    input.value = String(value);
+    input.value = String(rawValue);
   }
 }
 
 function collectSettings() {
   const settings = {};
   for (const [name, rawValue] of new FormData(strategyForm).entries()) {
-    if (name === "dataSource") continue;
-    if (name === "socialMode") {
-      settings[name] = rawValue;
-      continue;
-    }
-    let value = Number(rawValue);
-    if (percentageFields.has(name)) value /= 100;
-    settings[name] = value;
+    settings[name] = Number(rawValue);
   }
   return settings;
 }
@@ -327,14 +319,14 @@ function buildStoryRow() {
   text.className = "story-text";
   const meta = document.createElement("span");
   meta.className = "story-meta";
-  const laneTag = document.createElement("span");
-  laneTag.className = "story-lane";
+  const botTag = document.createElement("span");
+  botTag.className = "story-lane";
   const time = document.createElement("span");
   time.className = "story-time";
-  meta.append(laneTag, time);
+  meta.append(botTag, time);
   body.append(text, meta);
   row.append(icon, body);
-  return { row, icon, text, laneTag, time };
+  return { row, icon, text, botTag, time };
 }
 
 function fillStoryRow(refs, entry) {
@@ -343,13 +335,13 @@ function fillStoryRow(refs, entry) {
   refs.icon.textContent = item.icon ?? "·";
   refs.text.textContent = t(item.key, item.params);
   refs.time.textContent = fmtClock(timestamp);
-  if (item.lane) {
-    refs.laneTag.textContent = t(`lane.${item.lane}.name`);
-    refs.laneTag.classList.remove("hidden");
-    refs.laneTag.dataset.lane = item.lane;
+  if (item.bot) {
+    refs.botTag.textContent = t(`bot.${item.bot}.badge`);
+    refs.botTag.classList.remove("hidden");
+    refs.botTag.dataset.bot = item.bot;
   } else {
-    refs.laneTag.textContent = "";
-    refs.laneTag.classList.add("hidden");
+    refs.botTag.textContent = "";
+    refs.botTag.classList.add("hidden");
   }
 }
 
@@ -418,9 +410,9 @@ function renderTechnicalLog(logs = [], debug = []) {
     text.textContent = item.message;
     const message = String(item.message ?? "");
     if (item.level === "error" || /error|exception|gagal|stderr/i.test(message)) text.classList.add("error");
-    else if (message.includes("paper-buy")) text.classList.add("buy");
-    else if (message.includes("exit:")) text.classList.add("exit");
-    else if (message.includes("migration")) text.classList.add("launch");
+    else if (message.includes("[bot3] BUY")) text.classList.add("buy");
+    else if (message.includes("[bot3] SELL")) text.classList.add("exit");
+    else if (message.includes("[bot2] GREEN")) text.classList.add("launch");
     row.append(time, text);
     container.append(row);
   }
@@ -438,13 +430,17 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
   );
   const newestServerError = serverErrors[0]?.message;
   const newestClientError = clientDiagnostics.find((entry) => entry.level === "error")?.message;
-  const staleNoTradeCandidates = (Array.isArray(screener.candidates) ? screener.candidates : [])
-    .filter((candidate) => Number(candidate.ageSeconds ?? 0) >= 45 && Number(candidate.trades ?? 0) === 0).length;
-  const tradeFeedMissing = runtime.status === "running"
+  // Bot 1 is seeing coins but bot 2 cannot judge any of them: that means the market data is not
+  // arriving, which looks identical to "nothing is pumping" unless it is called out.
+  const bot1 = screener.bots?.screener ?? {};
+  const bot2 = screener.bots?.filter ?? {};
+  const waitingForData = Number(bot2.categories?.no_data ?? 0);
+  const dataMissing = runtime.status === "running"
     && runtime.feedConnected
-    && Number(screener.scanned ?? 0) >= 10
-    && Number(screener.entered ?? 0) === 0
-    && staleNoTradeCandidates >= 5;
+    && Number(bot1.coins ?? 0) >= 20
+    && Number(bot2.evaluated ?? 0) > 0
+    && Number(bot2.green ?? 0) + Number(bot2.red ?? 0) === 0
+    && waitingForData >= 10;
 
   let titleKey = "startup.ready";
   let badgeKey = "startup.readyBadge";
@@ -466,10 +462,10 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
     titleKey = "startup.stoppingTitle";
     badgeKey = "startup.stoppingBadge";
     messageKey = "startup.stoppingMessage";
-  } else if (tradeFeedMissing) {
-    titleKey = "startup.tradeMissingTitle";
-    badgeKey = "startup.tradeMissingBadge";
-    messageKey = "startup.tradeMissingMessage";
+  } else if (dataMissing) {
+    titleKey = "startup.dataMissingTitle";
+    badgeKey = "startup.dataMissingBadge";
+    messageKey = "startup.dataMissingMessage";
     level = "warning";
   } else if (runtime.status === "running" && runtime.feedConnected) {
     titleKey = "startup.liveTitle";
@@ -533,91 +529,92 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
   }
 }
 
+// The green list: what bot 2 says can pump, and what bot 3 is doing about each one.
 function renderScreener(status = {}, runtime = {}) {
-  const diagnosticsReady = Number(runtime.screenerDiagnosticsVersion ?? 0) >= 2;
-  const candidates = Array.isArray(status.candidates) ? status.candidates : [];
-  const activeCount = Math.max(Number(status.activeCount ?? 0), candidates.length);
+  const bots = status.bots ?? {};
+  const filter = bots.filter ?? {};
+  const executor = bots.executor ?? {};
+  const screener = bots.screener ?? {};
+  const greenList = Array.isArray(filter.greenList) ? filter.greenList : [];
 
   let phaseKey = "screener.stopped";
   if (runtime.status === "starting") phaseKey = "screener.starting";
   else if (runtime.status === "stopping") phaseKey = "screener.stopping";
   else if (runtime.status === "error") phaseKey = "screener.error";
-  else if (runtime.status === "running") {
-    phaseKey = !diagnosticsReady
-      ? "screener.updateServer"
-      : runtime.feedConnected ? "screener.live" : "screener.waitingFeed";
-  }
+  else if (runtime.status === "running") phaseKey = runtime.feedConnected ? "screener.live" : "screener.waitingFeed";
   const phase = $("#screenerState");
   setText(phase, t(phaseKey));
   phase.classList.toggle("error", runtime.status === "error");
-  phase.classList.toggle("warning", runtime.status === "running" && !diagnosticsReady);
   phase.classList.toggle("active", runtime.status === "running" && Boolean(runtime.feedConnected));
 
-  setNumber($("#screenerActiveCount"), activeCount, fmtInt);
-  setText($("#screenerCapacity"), fmtInt(status.maxActive ?? 500));
-  const countedTokens = activeCount + Number(status.rejected ?? 0) + Number(status.entered ?? 0) + Number(status.expired ?? 0);
-  setNumber($("#screenScanned"), Math.max(Number(status.scanned ?? 0), countedTokens), fmtInt);
-  setNumber($("#screenRejected"), status.rejected ?? 0, fmtInt);
-  setNumber($("#screenEntered"), status.entered ?? 0, fmtInt);
-  setNumber($("#screenExpired"), status.expired ?? 0, fmtInt);
+  setNumber($("#screenerActiveCount"), filter.greenNow ?? 0, fmtInt);
+  setText($("#screenerCapacity"), fmtInt(filter.maxGreen ?? 60));
+  setNumber($("#statScreened"), screener.coins ?? 0, fmtInt);
+  setNumber($("#statPerMinute"), screener.newPerMinute ?? 0, fmtInt);
+  setNumber($("#statRejected"), filter.red ?? 0, fmtInt);
+  setNumber($("#statBought"), executor.entries ?? 0, fmtInt);
   if (typeof renderFunnel === "function") renderFunnel(status);
+
+  // What bot 3 is doing with each green coin, keyed by mint.
+  const bot3State = new Map();
+  for (const position of Array.isArray(executor.positions) ? executor.positions : []) {
+    bot3State.set(position.mint, { text: t("bot3.holding"), className: "positive" });
+  }
+  for (const coin of Array.isArray(executor.watching) ? executor.watching : []) {
+    if (!bot3State.has(coin.mint)) bot3State.set(coin.mint, { text: waitingText(coin), className: "" });
+  }
 
   const body = $("#screenerBody");
   body.replaceChildren();
-  if (!candidates.length) {
+  if (!greenList.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 6;
     cell.className = "empty-cell";
-    cell.textContent = t(activeCount ? "screener.emptyActive" : "screener.empty");
+    cell.textContent = t(Number(screener.coins ?? 0) ? "screener.emptyScreening" : "screener.empty");
     row.append(cell);
     body.append(row);
     return;
   }
 
-  const lanes = status.lanes ?? {};
-  for (const candidate of candidates) {
+  for (const coin of greenList) {
     const row = document.createElement("tr");
 
     const tokenCell = document.createElement("td");
-    const label = candidate.symbol || candidate.name || shortMint(candidate.mint);
-    tokenCell.append(tokenReference(label, candidate, "trade-token token-link"));
-    if (isSyntheticToken(candidate) || hasTokenName(candidate)) {
-      const mint = document.createElement("span");
-      mint.className = "trade-mint";
-      mint.textContent = isSyntheticToken(candidate) ? "DEMO" : shortMint(candidate.mint);
-      tokenCell.append(isSyntheticToken(candidate) ? mint : tokenReference(mint.textContent, candidate, "trade-mint token-link"));
+    const label = coin.symbol || shortMint(coin.mint);
+    tokenCell.append(tokenReference(label, coin, "trade-token token-link"));
+    if (coin.symbol) {
+      tokenCell.append(tokenReference(shortMint(coin.mint), coin, "trade-mint token-link"));
     }
 
-    const laneCell = document.createElement("td");
-    const laneTag = document.createElement("span");
-    laneTag.className = "story-lane";
-    laneTag.dataset.lane = candidate.lane || "fresh";
-    laneTag.textContent = t(`lane.${candidate.lane || "fresh"}.name`);
-    laneCell.append(laneTag);
-
-    const stageCell = document.createElement("td");
-    stageCell.className = "candidate-stage";
-    const stage = humanizeStage(candidate, lanes[candidate.lane]?.thresholds ?? {});
-    const stageHead = document.createElement("span");
-    stageHead.className = "stage-head";
-    stageHead.textContent = stage.headline;
-    stageCell.append(stageHead);
-    if (stage.detail) {
-      const detail = document.createElement("span");
-      detail.className = "stage-detail";
-      detail.textContent = stage.detail;
-      stageCell.append(detail);
-    }
-
-    const activityCell = document.createElement("td");
-    activityCell.textContent = `${fmtInt(candidate.trades)} / ${fmtInt(candidate.buys)} / ${fmtInt(candidate.uniqueBuyers)}`;
-    const mcCellEl = document.createElement("td");
-    mcCellEl.textContent = fmtUsdExact(candidate.currentMarketCapUsd);
     const ageCell = document.createElement("td");
-    ageCell.textContent = fmtDuration(Number(candidate.ageSeconds ?? 0) * 1000);
+    ageCell.textContent = Number.isFinite(coin.ageSeconds) ? fmtDuration(coin.ageSeconds * 1000) : "—";
 
-    row.append(tokenCell, laneCell, stageCell, activityCell, mcCellEl, ageCell);
+    const scoreCell = document.createElement("td");
+    scoreCell.className = "candidate-stage";
+    const scoreHead = document.createElement("span");
+    scoreHead.className = "stage-head";
+    scoreHead.textContent = fmtScore(coin.score);
+    const scoreWhy = document.createElement("span");
+    scoreWhy.className = "stage-detail";
+    scoreWhy.textContent = leadText(coin.lead);
+    scoreCell.append(scoreHead, scoreWhy);
+
+    const surgeCell = document.createElement("td");
+    surgeCell.textContent = surgeText(coin);
+
+    const mcCellEl = document.createElement("td");
+    mcCellEl.textContent = fmtUsdExact(coin.marketCapUsd);
+
+    const stateCell = document.createElement("td");
+    stateCell.className = "candidate-stage";
+    const state = bot3State.get(coin.mint) ?? { text: t("bot3.notWatching"), className: "" };
+    const stateText = document.createElement("span");
+    stateText.className = `stage-head ${state.className}`.trim();
+    stateText.textContent = state.text;
+    stateCell.append(stateText);
+
+    row.append(tokenCell, ageCell, scoreCell, surgeCell, mcCellEl, stateCell);
     body.append(row);
   }
 }
@@ -643,7 +640,7 @@ async function refresh() {
     renderNowHeadline(data.runtime, data.screener);
     renderStory(data.logs);
     renderTechnicalLog(data.logs, data.screenerDebug);
-    renderLaneCards(data.screener, data.runtime);
+    renderBotCards(data.screener, data.runtime);
     renderAccount(data.account, data.settings);
     renderStartupDiagnostics(data.runtime, data.logs, data.screener);
     renderScreener(data.screener, data.runtime);

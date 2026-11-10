@@ -1,9 +1,11 @@
-// Discovery of tokens that are ALREADY trading (1 hour .. 30 days old) for the young / veteran lanes.
-// Source: GeckoTerminal public API (no key, 30 calls/minute for everything that uses it, so every call
-// goes through a shared budget). It lists what GeckoTerminal ranks (trending / top pools), not every
-// token in existence: pools nobody trades never show up, which is fine for this purpose.
-
-import { laneForAge } from "./lanes.js";
+// Where bot 1 finds coins that are already trading — at ANY age, from minutes to months old.
+//
+// Source: GeckoTerminal public API (no key, 30 calls/minute shared by everything that uses it, so
+// every call goes through the budget below). One call returns one page of 20 pools; the job list is
+// worked through round-robin, so a full sweep sees a few hundred distinct pools and then starts
+// again with fresh numbers. It lists what GeckoTerminal ranks (new, trending, top by volume), not
+// every token in existence: pools nobody trades at all never show up, which is fine — a coin with
+// no trades is not about to pump.
 
 const GECKO = "https://api.geckoterminal.com/api/v2/networks/solana";
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -15,16 +17,27 @@ export const EXCLUDED_BASE_MINTS = new Set([
   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
 ]);
 
-// Worked through round-robin, one call per discovery tick.
+// Worked through round-robin, one call per discovery tick. "new" catches coins minutes old,
+// "trending" catches whatever the market is looking at right now, and "top" walks ten pages of the
+// highest-volume pools on Solana, which is where a month-old coin that woke up turns up again.
 export const DISCOVERY_JOBS = [
+  { kind: "new", page: 1 },
   { kind: "trending", page: 1 },
   { kind: "top", page: 1 },
+  { kind: "new", page: 2 },
   { kind: "trending", page: 2 },
   { kind: "top", page: 2 },
-  { kind: "top", page: 3 },
   { kind: "trending", page: 3 },
+  { kind: "top", page: 3 },
+  { kind: "trending", page: 4 },
   { kind: "top", page: 4 },
+  { kind: "trending", page: 5 },
   { kind: "top", page: 5 },
+  { kind: "top", page: 6 },
+  { kind: "top", page: 7 },
+  { kind: "top", page: 8 },
+  { kind: "top", page: 9 },
+  { kind: "top", page: 10 },
 ];
 
 // Sliding-window limiter shared by every GeckoTerminal call (discovery, refresh, unique-buyer checks).
@@ -119,24 +132,10 @@ export function parseGeckoPool(row, nowMs = Date.now()) {
   };
 }
 
-// Decides what to do with a discovered pool. Returns { lane, reject? } or null when the pool is not
-// relevant to any lane at all (wrong quote token, wrong age, not a memecoin).
-//   reject = { category, detail } means "looked at it and said no" (counted, then put on cooldown).
-export function assessPool(pool, lanes) {
-  if (!pool?.mint || !pool.pool) return null;
-  if (pool.quoteMint !== SOL_MINT || EXCLUDED_BASE_MINTS.has(pool.mint)) return null;
-  const laneId = laneForAge(pool.ageSeconds);
-  if (!laneId || !lanes[laneId]?.enabled) return null;
-  const cfg = lanes[laneId].cfg;
-
-  if (pool.marketCapUsd !== null && (pool.marketCapUsd < cfg.minMarketCapUsd || pool.marketCapUsd > cfg.maxMarketCapUsd)) {
-    return { lane: laneId, reject: { category: "market_cap", detail: `market cap $${Math.round(pool.marketCapUsd).toLocaleString("en-US")} outside the ${laneId} range` } };
-  }
-  if (pool.liquidityUsd !== null && cfg.minLiquidityUsd > 0 && pool.liquidityUsd < cfg.minLiquidityUsd) {
-    return { lane: laneId, reject: { category: "liquidity", detail: `liquidity $${Math.round(pool.liquidityUsd).toLocaleString("en-US")} below $${Math.round(cfg.minLiquidityUsd).toLocaleString("en-US")}` } };
-  }
-  if (pool.volumeH1Usd !== null && cfg.minVolumeH1Usd > 0 && pool.volumeH1Usd < cfg.minVolumeH1Usd) {
-    return { lane: laneId, reject: { category: "volume", detail: `1h volume $${Math.round(pool.volumeH1Usd).toLocaleString("en-US")} below $${Math.round(cfg.minVolumeH1Usd).toLocaleString("en-US")}` } };
-  }
-  return { lane: laneId };
+// Is this row a Solana memecoin paired against SOL? That is the only thing bot 1 decides — it has
+// no opinion on age, size or quality, which is bot 2's job. Everything else is screened and logged.
+export function isMemecoinPool(pool) {
+  if (!pool?.mint || !pool.pool) return false;
+  if (pool.quoteMint !== SOL_MINT) return false;
+  return !EXCLUDED_BASE_MINTS.has(pool.mint);
 }

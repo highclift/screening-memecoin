@@ -4,14 +4,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createDevBook } from "../src/devbook.js";
-import { liquidityReason, holderReason, devReason } from "../src/filters.js";
-import { scoreCandidate, WEIGHTS } from "../src/analyst.js";
+import { devReason, gateReason, holderReason, GATE_DEFAULTS } from "../src/filters.js";
 import { topHolderPct, fetchHolderStats } from "../src/holders.js";
 import { createJournal } from "../src/journal.js";
+import { createMeter } from "../src/meter.js";
 import { loadConfig } from "../src/config.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "screener-"));
 const MINT = "So11111111111111111111111111111111111111112";
+
+// A coin that passes every hard gate, so each test can break exactly one thing.
+const tradable = (overrides = {}) => ({
+  marketCapUsd: 400_000,
+  liquidityUsd: 40_000,
+  tradesH1: 300,
+  volumeH1Usd: 60_000,
+  ...overrides,
+});
 
 test("devbook: unknown creator is unknown, not bad", () => {
   const book = createDevBook({ filePath: null });
@@ -48,47 +57,44 @@ test("devbook: persists to disk and reloads", () => {
   assert.equal(second.assess("mint-c2", { maxDevLaunches: 1 }).verdict, "reject"); // 2 launches > 1
 });
 
-test("filters: unknown data never rejects", () => {
-  const config = { minLiquidityUsd: 5000, maxTopHoldersPct: 35, topHoldersCount: 5 };
-  assert.equal(liquidityReason({ liquidityUsd: null }, config), null);
-  assert.equal(liquidityReason({ liquidityUsd: 1200 }, config) !== null, true);
-  assert.equal(liquidityReason({ liquidityUsd: 9000 }, config), null);
-  assert.equal(liquidityReason({ liquidityUsd: 1 }, { ...config, minLiquidityUsd: 0 }), null);
+test("gates: missing data waits instead of rejecting", () => {
+  const waiting = gateReason({ marketCapUsd: 400_000 }, GATE_DEFAULTS);
+  assert.equal(waiting.category, "no_data");
+  assert.equal(waiting.wait, true, "a coin with no data yet must stay in the registry");
+  assert.equal(gateReason({ liquidityUsd: 40_000 }, GATE_DEFAULTS).wait, true);
+
+  // Unknown activity never rejects: only a reported number below the floor does.
+  assert.equal(gateReason(tradable({ tradesH1: undefined, volumeH1Usd: undefined }), GATE_DEFAULTS), null);
+});
+
+test("gates: an untradable coin is rejected whatever else it looks like", () => {
+  assert.equal(gateReason(tradable(), GATE_DEFAULTS), null);
+  assert.equal(gateReason(tradable({ liquidityUsd: 900 }), GATE_DEFAULTS).category, "liquidity");
+  // $5M coin behind a $20k pool: enough liquidity in absolute terms, nowhere near enough for the size.
+  assert.equal(gateReason(tradable({ marketCapUsd: 5_000_000, liquidityUsd: 20_000 }), GATE_DEFAULTS).category, "liquidity_ratio");
+  assert.equal(gateReason(tradable({ tradesH1: 4 }), GATE_DEFAULTS).category, "dead");
+  assert.equal(gateReason(tradable({ volumeH1Usd: 100 }), GATE_DEFAULTS).category, "dead_volume");
+  assert.equal(gateReason(tradable({ marketCapUsd: 5_000, liquidityUsd: 5_000 }), GATE_DEFAULTS).category, "market_cap");
+  assert.equal(gateReason(tradable({ marketCapUsd: 90_000_000, liquidityUsd: 9_000_000 }), GATE_DEFAULTS).category, "market_cap");
+  assert.match(gateReason(tradable({ liquidityUsd: 900 }), GATE_DEFAULTS).detail, /\$900 below \$5,000/);
+});
+
+test("gates: age is never part of the decision", () => {
+  // The same numbers on a 2-minute-old coin and a 3-month-old coin get the same answer. This is
+  // the whole point: bot 2 judges what a coin is doing now, not when it was born.
+  assert.equal(gateReason({ ...tradable(), ageSeconds: 120 }, GATE_DEFAULTS), null);
+  assert.equal(gateReason({ ...tradable(), ageSeconds: 90 * 86_400 }, GATE_DEFAULTS), null);
+});
+
+test("holder and dev gates: unknown data never rejects", () => {
+  const config = { maxTopHoldersPct: 35, topHoldersCount: 5 };
   assert.equal(holderReason({ status: "pending" }, config), null);
-  assert.equal(holderReason({ status: "ok", topPct: 50 }, config) !== null, true);
+  assert.equal(holderReason(null, config), null);
+  assert.equal(holderReason({ status: "ok", topPct: 50 }, config).category, "holders");
   assert.equal(holderReason({ status: "ok", topPct: 20 }, config), null);
-  assert.equal(devReason({ verdict: "reject", reason: "bad" }), "bad");
+  assert.equal(devReason({ verdict: "reject", reason: "bad" }).detail, "bad");
   assert.equal(devReason({ verdict: "unknown" }), null);
-});
-
-test("analyst: weights sum to 1 and scores stay in 0..1", () => {
-  const total = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
-  assert.ok(Math.abs(total - 1) < 1e-9);
-
-  const config = { minUniqueBuyers: 8, bouncePct: 0.05, maxTopHoldersPct: 35 };
-  const strong = {
-    trades: 100, buys: 90, buyers: new Set(Array.from({ length: 30 }, (_, i) => `w${i}`)),
-    lowMarketCapUsd: 50_000, currentMarketCapUsd: 60_000, liquidityUsd: 20_000,
-  };
-  const weak = {
-    trades: 100, buys: 45, buyers: new Set(["a"]),
-    lowMarketCapUsd: 50_000, currentMarketCapUsd: 50_000, liquidityUsd: 100,
-  };
-  const good = scoreCandidate(strong, config, { dev: { verdict: "clean" }, holders: { status: "ok", topPct: 5 } });
-  const bad = scoreCandidate(weak, config, { dev: { verdict: "unknown" }, holders: { status: "ok", topPct: 34 } });
-  assert.ok(good.score > 0.9 && good.score <= 1, `good=${good.score}`);
-  assert.ok(bad.score < 0.3, `bad=${bad.score}`);
-  assert.ok(good.score > bad.score);
-});
-
-test("analyst: missing data is neutral (0.5), not zero", () => {
-  const config = { minUniqueBuyers: 8, bouncePct: 0.05, maxTopHoldersPct: 35 };
-  const c = { trades: 0, buys: 0, buyers: new Set(), lowMarketCapUsd: null, currentMarketCapUsd: null, liquidityUsd: null };
-  const { parts } = scoreCandidate(c, config, {});
-  assert.equal(parts.liquidity, 0.5);
-  assert.equal(parts.holders, 0.5);
-  assert.equal(parts.dev, 0.5);
-  assert.equal(parts.rebound, 0);
+  assert.equal(devReason({ verdict: "clean" }), null);
 });
 
 test("holders: skips the largest account (pool) by default and counts the next N", () => {
@@ -144,12 +150,12 @@ test("holders: fetchHolderStats parses getTokenLargestAccounts + getTokenSupply"
 test("journal: buffers, appends JSONL, and rotates past maxBytes", () => {
   const filePath = path.join(tmp(), "journal.jsonl");
   const journal = createJournal({ filePath, maxBytes: 200 });
-  journal.write({ type: "reject", category: "social", mint: "m1" });
+  journal.write({ type: "verdict", state: "red", mint: "m1" });
   journal.write({ type: "entry", mint: "m2", score: 0.7 });
   journal.flush();
   const lines = fs.readFileSync(filePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(lines.length, 2);
-  assert.equal(lines[0].category, "social");
+  assert.equal(lines[0].state, "red");
   assert.ok(lines[0].t);
 
   for (let i = 0; i < 10; i += 1) journal.write({ type: "filler", note: "x".repeat(50) });
@@ -161,18 +167,31 @@ test("journal: buffers, appends JSONL, and rotates past maxBytes", () => {
   journal.stop();
 });
 
-test("config: new settings have safe defaults and are validated", () => {
-  const c = loadConfig({});
-  assert.equal(c.minScore, 0.5);
-  assert.equal(c.solanaRpcUrl, "");
-  assert.equal(c.metadataHosts, undefined);
-  assert.equal(c.topHoldersSkipLargest, true);
-  assert.equal(c.mode, "paper");
+test("meter: counts only the last minute", () => {
+  const meter = createMeter();
+  const start = 1_000_000;
+  meter.hit(120, start);
+  assert.equal(meter.perMinute(start + 1000), 120);
+  assert.equal(meter.perMinute(start + 61_000), 0, "a minute later those hits no longer count");
+});
 
-  assert.throws(() => loadConfig({ MIN_SCORE: "2" }), /MIN_SCORE/);
+test("config: money limits and safety floors have safe defaults and are validated", () => {
+  const c = loadConfig({});
+  assert.equal(c.mode, "paper");
+  assert.equal(c.solanaRpcUrl, "");
+  assert.equal(c.topHoldersSkipLargest, true);
+  assert.equal(c.greenScore, 0.58);
+  assert.equal(c.gates.minLiquidityUsd, GATE_DEFAULTS.minLiquidityUsd);
+  // There are no entry/exit settings any more: bot 3 derives those per coin.
+  for (const gone of ["pullbackPct", "bouncePct", "takeProfitPct", "stopLossPct", "maxHoldSeconds", "minScore", "lanes"]) {
+    assert.equal(c[gone], undefined, `${gone} must not come back as a setting`);
+  }
+
+  assert.throws(() => loadConfig({ MODE: "live" }), /paper/);
   assert.throws(() => loadConfig({ SOLANA_RPC_URL: "ftp://nope" }), /SOLANA_RPC_URL/);
   assert.throws(() => loadConfig({ TOP_HOLDERS_SKIP_LARGEST: "maybe" }), /true or false/);
-  assert.throws(() => loadConfig({ MODE: "live" }), /paper/);
-  assert.deepEqual(loadConfig({ METADATA_HOSTS: "a.com, b.com" }).metadataHosts, ["a.com", "b.com"]);
-  assert.equal(loadConfig({ TOP_HOLDERS_SKIP_LARGEST: "false" }).topHoldersSkipLargest, false);
+  assert.throws(() => loadConfig({ BUY_AMOUNT_SOL: "5", PAPER_START_BALANCE_SOL: "1" }), /BUY_AMOUNT_SOL/);
+  assert.throws(() => loadConfig({ MIN_MARKET_CAP_USD: "100000", MAX_MARKET_CAP_USD: "50000" }), /MIN_MARKET_CAP_USD/);
+  assert.throws(() => loadConfig({ WATCH_SCORE: "0.9", GREEN_SCORE: "0.5" }), /WATCH_SCORE/);
+  assert.equal(loadConfig({ GREEN_SCORE: "0.7" }).greenScore, 0.7);
 });

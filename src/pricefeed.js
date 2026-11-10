@@ -34,10 +34,12 @@ function positive(value) {
 }
 
 // Returns Map<mint, {price, marketCapUsd, reportedMarketCapUsd, solUsd, trades, buys, sells,
-//   tradesH1, buysH1, volumeH1, volumeH24, priceChangeH1, pairCreatedAt, pool, liquidityUsd, socials}>.
-// `price` / `marketCapUsd` assume the 1B Pump.fun supply (fresh lane). `reportedMarketCapUsd` is what
-// DexScreener itself reports (marketCap, else fdv): the age lanes use that because older tokens do not
-// have a 1B supply. `trades`/`buys` are the last 5 minutes, `tradesH1`/`buysH1` the last hour.
+//   tradesH1, buysH1, volumeH1, volumeH24, priceChangeM5, priceChangeH1, priceChangeH24,
+//   pairCreatedAt, pool, liquidityUsd, socials}>.
+// `price` / `marketCapUsd` assume the 1B Pump.fun supply, which only holds for a coin that has not
+// left the bonding curve. `reportedMarketCapUsd` is what DexScreener itself reports (marketCap, else
+// fdv) and is what the bots use, because an older coin can have any supply.
+// `trades`/`buys` are the last 5 minutes, `tradesH1`/`buysH1` the last hour.
 export async function fetchDexSnapshots(mints, fetchImpl = fetch) {
   const out = new Map();
   if (!mints.length) return out;
@@ -74,7 +76,9 @@ export async function fetchDexSnapshots(mints, fetchImpl = fetch) {
       tradesH1: buysH1 + sellsH1,
       volumeH1: Number(pair?.volume?.h1) || 0,
       volumeH24: Number(pair?.volume?.h24) || 0,
+      priceChangeM5: Number.isFinite(Number(pair?.priceChange?.m5)) ? Number(pair.priceChange.m5) : null,
       priceChangeH1: Number.isFinite(Number(pair?.priceChange?.h1)) ? Number(pair.priceChange.h1) : null,
+      priceChangeH24: Number.isFinite(Number(pair?.priceChange?.h24)) ? Number(pair.priceChange.h24) : null,
       pairCreatedAt: Number(pair.pairCreatedAt) || null,
       pool: pair.pairAddress ?? "",
       liquidityUsd,

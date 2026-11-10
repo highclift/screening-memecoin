@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadConfig } from "../src/config.js";
-import { SOL_MINT, assessPool, createBudget, fetchGeckoPools, fetchGeckoPoolsMulti, parseGeckoPool } from "../src/discovery.js";
+import { SOL_MINT, isMemecoinPool, createBudget, fetchGeckoPools, fetchGeckoPoolsMulti, parseGeckoPool } from "../src/discovery.js";
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -29,8 +28,6 @@ function row({ address = "poolAAA", mint = "MintAAA", quote = SOL_MINT, ageHours
     },
   };
 }
-
-const lanes = loadConfig({}).lanes;
 
 test("parseGeckoPool extracts the fields the bot uses", () => {
   const p = parseGeckoPool(row(), NOW);
@@ -75,44 +72,27 @@ test("parseGeckoPool rejects garbage rows", () => {
   assert.equal(parseGeckoPool(noDate, NOW).ageSeconds, null);
 });
 
-test("assessPool: young pool that passes the cheap checks becomes a candidate", () => {
-  const v = assessPool(parseGeckoPool(row(), NOW), lanes);
-  assert.deepEqual(v, { lane: "young" });
+test("isMemecoinPool: a SOL-paired memecoin at any age is screened", () => {
+  // Age is not part of this decision: bot 1 screens a 20-minute-old coin and a 3-month-old coin
+  // the same way, and bot 2 decides what to make of them.
+  for (const ageHours of [0.3, 5, 24 * 10, 24 * 200]) {
+    assert.equal(isMemecoinPool(parseGeckoPool(row({ ageHours }), NOW)), true, `age ${ageHours}h`);
+  }
+  // Unknown numbers are no reason to skip a coin either.
+  const sparse = row();
+  sparse.attributes.reserve_in_usd = null;
+  sparse.attributes.market_cap_usd = null;
+  sparse.attributes.fdv_usd = null;
+  sparse.attributes.volume_usd = {};
+  assert.equal(isMemecoinPool(parseGeckoPool(sparse, NOW)), true);
 });
 
-test("assessPool: veteran band", () => {
-  const v = assessPool(parseGeckoPool(row({ ageHours: 24 * 10, mcap: "2000000", fdv: "2000000", liq: "120000", volH1: "90000" }), NOW), lanes);
-  assert.deepEqual(v, { lane: "veteran" });
-});
-
-test("assessPool ignores pools that belong to no lane", () => {
-  assert.equal(assessPool(parseGeckoPool(row({ ageHours: 0.3 }), NOW), lanes), null, "under 1h is the fresh lane's job");
-  assert.equal(assessPool(parseGeckoPool(row({ ageHours: 24 * 60 }), NOW), lanes), null, "older than 30 days");
-  assert.equal(assessPool(parseGeckoPool(row({ quote: USDC }), NOW), lanes), null, "non-SOL quote");
-  assert.equal(assessPool(parseGeckoPool(row({ mint: SOL_MINT, quote: SOL_MINT }), NOW), lanes), null, "base is SOL itself");
-  assert.equal(assessPool(parseGeckoPool(row({ mint: USDC }), NOW), lanes), null, "stablecoin base");
-  assert.equal(assessPool({ mint: "", pool: "" }, lanes), null);
-});
-
-test("assessPool returns a counted rejection with the reason", () => {
-  assert.equal(assessPool(parseGeckoPool(row({ mcap: "10000", fdv: "10000" }), NOW), lanes).reject.category, "market_cap");
-  assert.equal(assessPool(parseGeckoPool(row({ liq: "2000" }), NOW), lanes).reject.category, "liquidity");
-  assert.equal(assessPool(parseGeckoPool(row({ volH1: "100" }), NOW), lanes).reject.category, "volume");
-  assert.match(assessPool(parseGeckoPool(row({ liq: "2000" }), NOW), lanes).reject.detail, /liquidity \$2,000 below \$15,000/);
-});
-
-test("assessPool: unknown data never rejects", () => {
-  const r = row();
-  r.attributes.reserve_in_usd = null;
-  r.attributes.market_cap_usd = null;
-  r.attributes.fdv_usd = null;
-  r.attributes.volume_usd = {};
-  assert.deepEqual(assessPool(parseGeckoPool(r, NOW), lanes), { lane: "young" });
-});
-
-test("assessPool skips a lane that is switched off", () => {
-  const off = loadConfig({ LANES: "fresh" }).lanes;
-  assert.equal(assessPool(parseGeckoPool(row(), NOW), off), null);
+test("isMemecoinPool: anything that is not a memecoin against SOL is skipped", () => {
+  assert.equal(isMemecoinPool(parseGeckoPool(row({ quote: USDC }), NOW)), false, "non-SOL quote");
+  assert.equal(isMemecoinPool(parseGeckoPool(row({ mint: SOL_MINT, quote: SOL_MINT }), NOW)), false, "base is SOL itself");
+  assert.equal(isMemecoinPool(parseGeckoPool(row({ mint: USDC }), NOW)), false, "stablecoin base");
+  assert.equal(isMemecoinPool({ mint: "", pool: "" }), false);
+  assert.equal(isMemecoinPool(null), false);
 });
 
 test("createBudget enforces calls per minute with a sliding window", () => {
