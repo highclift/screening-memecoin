@@ -125,6 +125,7 @@ const EXIT_KEY = {
   "max-hold": "ev.exit.maxHold",
   "max-hold-total": "ev.exit.maxHoldTotal",
   "max-hold-stale": "ev.exit.stale",
+  manual: "ev.exit.manual",
 };
 
 // Each matcher: [regex, builder]. The builder gets the match and returns the feed item.
@@ -196,6 +197,14 @@ const MATCHERS = [
       bot: "executor",
     };
   }],
+
+  [/^[bot2] (S+) collapsed while held; banned from now on/i, (m) => ({
+    key: "ev.banned",
+    params: { token: tokenLabel(m[1]) },
+    tone: "bad",
+    icon: "⛔",
+    bot: "filter",
+  })],
 
   // ---------- worker: feed ----------
   // Being rate limited is a speed limit, not a failure: the other sources keep going, so this is a

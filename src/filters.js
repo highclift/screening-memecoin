@@ -57,14 +57,38 @@ export function gateReason(record, gates = GATE_DEFAULTS) {
   return null;
 }
 
-// Holder concentration, checked over RPC only for coins that already scored well (it is the one
-// expensive lookup in the pipeline).
+// What the chain says about a coin, checked over RPC only for coins that already scored well (it
+// is the one expensive lookup in the pipeline). Each rule is skipped when its data is missing, so
+// an RPC that answered only half the questions still contributes what it knows.
+//
+// Order matters only for which message you see first; any one of these is enough to refuse.
 export function holderReason(holders, config) {
-  if (!holders || holders.status !== "ok" || !Number.isFinite(holders.topPct)) return null;
-  if (holders.topPct > config.maxTopHoldersPct) {
+  if (!holders || holders.status !== "ok") return null;
+
+  // Supply that can still be printed, or tokens that can be frozen in your wallet, make every
+  // other number meaningless.
+  if (config.requireMintRevoked && holders.mintAuthority) {
+    return { category: "mint_authority", detail: "the creator can still mint more supply" };
+  }
+  if (config.requireFreezeRevoked && holders.freezeAuthority) {
+    return { category: "freeze_authority", detail: "the creator can still freeze your tokens" };
+  }
+
+  // One holder who can sell more than the pool can absorb is the whole game: that is the sell
+  // that drops the price 99% with no price in between for a stop to catch.
+  if (Number.isFinite(holders.topPct) && holders.topPct > config.maxTopHoldersPct) {
     return {
       category: "holders",
       detail: `top ${config.topHoldersCount} holders own ${holders.topPct.toFixed(1)}% (limit ${config.maxTopHoldersPct}%)`,
+    };
+  }
+
+  // Brand-new wallets holding the supply are one actor wearing several hats, not a crowd.
+  if (Number.isFinite(holders.freshPct) && holders.checkedHolders >= 2
+    && holders.freshPct > config.maxFreshHoldersPct) {
+    return {
+      category: "fresh_wallets",
+      detail: `${holders.freshHolders} of ${holders.checkedHolders} top holders are brand-new wallets`,
     };
   }
   return null;

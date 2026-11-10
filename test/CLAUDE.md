@@ -70,6 +70,17 @@ status it publishes to the dashboard every second. One process, so the three sha
 - `test/`: node:test suites, all offline. `PIPELINE.md`: how the three bots work. `.env.example`: all settings.
 
 ## Things that are easy to get wrong
+- **Test runs share the live `data/` directory.** The worker resolves `data/` from its cwd and
+  server.js forks it with `cwd: ROOT`, so a second instance writes the same paper account as the
+  one the user is running. Check for a worker (parent = the dashboard server) before starting one.
+- `src/holders.js` answers four things over RPC for a coin about to be bought: concentration,
+  mint authority, freeze authority, and whether the top holders are brand-new wallets. It asks the
+  chain whether each owner is a wallet (System Program) or a pool vault (a DEX program) instead of
+  assuming the biggest holder is the pool — that assumption hid whales holding 99% of supply.
+  Roughly 3 + N calls, so it only runs on coins that already scored green.
+- A rug is not a stop-loss problem. In the measured session 5 coins went from above their stop to
+  near zero between two polls and cost 74% of all losses; the other 61 trades cost the rest.
+  Tightening the stop does nothing for that — only not holding the coin does.
 - `writeVerdict` needs the *previous* verdict passed in; the record already holds the new one by then.
 - Bot 3 must see the verdict from this pass, so `filter.consider` runs before `executor.onData` in
   `onScreened`.
@@ -94,7 +105,7 @@ status it publishes to the dashboard every second. One process, so the three sha
 ## Status
 The three-bot rewrite replaced the old three-lane design (`fresh`/`young`/`veteran`, one balance
 each), which screened different coins per lane and could never look at an old coin waking up.
-88 unit tests pass. Verified against the live APIs: bot 1 screened 118 coins in 80s across every age
+97 unit tests pass. Verified against the live APIs: bot 1 screened 118 coins in 80s across every age
 band (24 of them older than 30 days), bot 2 turned a real 52-day-old coin green at 6-10x its normal
 hourly volume, and bot 3 entered and exited by itself with per-coin levels, including a profitable
 `trail-locked` exit. The dashboard was driven end to end through `/api/state`. The CSS for the new card lists was added

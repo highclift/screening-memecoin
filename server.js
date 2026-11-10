@@ -322,6 +322,26 @@ app.post("/api/settings", (req, res) => {
   }
 });
 
+// Emergency exit. `mint` closes one coin; omitting it closes every open position. The worker sells
+// at the last price it saw, with the usual simulated fee and slippage.
+app.post("/api/close", (req, res) => {
+  if (!worker || !["starting", "running"].includes(workerStatus)) {
+    return res.status(409).json({ error: "Bot tidak sedang berjalan." });
+  }
+  const mint = typeof req.body?.mint === "string" && req.body.mint ? req.body.mint : null;
+  if (mint && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) {
+    return res.status(400).json({ error: "Alamat koin tidak valid." });
+  }
+  worker.send({ type: "close-position", mint }, (error) => {
+    if (error) {
+      addLog(`[close error] Gagal mengirim perintah tutup: ${error.message}`);
+      return res.status(500).json({ error: "Perintah tidak terkirim ke bot." });
+    }
+    addLog(mint ? `Perintah tutup manual dikirim untuk ${mint.slice(0, 8)}…` : "Perintah tutup SEMUA posisi dikirim.");
+    res.json({ ok: true });
+  });
+});
+
 app.post("/api/stop", (_req, res) => {
   if (!worker) return res.json({ ok: true, status: "stopped" });
   workerStatus = "stopping";

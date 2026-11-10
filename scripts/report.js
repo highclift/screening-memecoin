@@ -93,6 +93,8 @@ else {
   const greens = verdicts.filter((r) => r.state === "green");
   console.log(`judgements ${verdicts.length} | green ${greens.length} (${pct(greens.length, verdicts.length)}) | watch ${verdicts.filter((r) => r.state === "watch").length} | red ${verdicts.filter((r) => r.state === "red").length} | rugs seen ${bot2.records.filter((r) => r.type === "rug").length}`);
   console.log(`why coins were turned down: ${list(counted(verdicts.filter((r) => r.state === "red"), "category"))}`);
+  const rugs = bot2.records.filter((r) => r.type === "rug");
+  if (rugs.length) console.log(`coins banned after collapsing: ${rugs.length} (never bought again)`);
   if (greens.length) {
     console.log(`green coins by age: ${list(counted(greens.map((r) => ({ bucket: ageBucket(r.ageSeconds) })), "bucket"))}`);
     console.log(`what made them green: ${list(counted(greens, "lead"))}`);

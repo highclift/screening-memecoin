@@ -44,10 +44,11 @@ const DYNAMIC = [
   ...["measure", "dip", "high", "bounce", "buyers", "spike", "data", "entry", "unknown"].map((state) => `waiting.${state}`),
   // Bot 2's gate categories (src/filters.js) and the states it reports.
   ...["market_cap", "liquidity", "liquidity_ratio", "dead", "dead_volume", "holders", "dev_history",
-    "low_score", "no_data", "building", "holders_pending", "green", "unknown"].map((c) => `reason.${c}`),
+    "low_score", "no_data", "building", "holders_pending", "green", "rugged",
+    "mint_authority", "freeze_authority", "fresh_wallets", "unknown"].map((c) => `reason.${c}`),
   // Bot 3's exit reasons (src/bots/executor.js).
   ...["stop-loss", "break-even", "trail", "trail-locked", "stall", "breakdown", "max-hold",
-    "max-hold-total", "max-hold-stale", "exit"]
+    "max-hold-total", "max-hold-stale", "manual", "exit"]
     .map((reason) => `exit.${reason}`),
   ...["stopped", "starting", "running", "stopping", "error"].map((state) => `runtime.${state}`),
 ];

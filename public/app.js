@@ -245,8 +245,36 @@ function renderPositions(positions) {
       now: fmtUsdExact(position.currentMarketCapUsd),
     });
     numbers.append(pnl, cost);
-    row.append(ident, numbers);
+
+    // Emergency exit for this one coin. Confirmed, because it spends the position immediately.
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "button button-quiet button-small position-close";
+    close.textContent = t("positions.close");
+    close.title = t("positions.closeHelp");
+    close.addEventListener("click", () => closePositions(position.mint, tokenLabelText));
+
+    row.append(ident, numbers, close);
     container.append(row);
+  }
+}
+
+// mint = close that one; null = close everything.
+async function closePositions(mint, label) {
+  const question = mint ? t("msg.closeConfirm", { token: label }) : t("msg.closeAllConfirm");
+  if (!window.confirm(question)) return;
+  try {
+    const response = await fetch("/api/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mint ? { mint } : {}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not close the position.");
+    showMessage(mint ? "msg.closed" : "msg.closedAll");
+    await refresh();
+  } catch (error) {
+    showRawMessage(error.message);
   }
 }
 
@@ -737,6 +765,8 @@ $("#stopButton").addEventListener("click", async () => {
     showRawMessage(error.message);
   }
 });
+
+$("#closeAllButton").addEventListener("click", () => closePositions(null));
 
 $("#resetButton").addEventListener("click", async () => {
   const balance = Number(strategyForm.elements.namedItem("paperStartBalanceSol").value);

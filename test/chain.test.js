@@ -55,6 +55,8 @@ function pipeline(settings = {}) {
     persist: () => {},
     solUsd: () => SOL_USD,
     isGreen: (mint) => filter.isGreen(mint),
+    // Mirrors src/index.js: a position that collapses bans the coin.
+    onRug: (mint) => devBook.recordRug(mint),
     log,
     note,
   });
@@ -183,11 +185,37 @@ test("bot 2 rejects an untradable coin before scoring it, and a rugged dev outri
   assert.equal(nodata.verdict.state, "wait");
   assert.equal(nodata.verdict.category, "no_data");
 
+  // Two separate protections. The coin that collapsed is banned by its own address...
   p.devBook.recordLaunch("dev-rug", "RUG1");
   p.devBook.recordRug("RUG1");
   const rugged = p.screen({ mint: "RUG1", ...pumping(400_000) }, now);
   assert.equal(rugged.verdict.state, "red");
-  assert.equal(rugged.verdict.category, "dev_history");
+  assert.equal(rugged.verdict.category, "rugged", "a coin that already went to zero is never bought again");
+
+  // ...and anything else from the same wallet is turned down on the creator's record.
+  p.devBook.recordLaunch("dev-rug", "RUG2");
+  const sibling = p.screen({ mint: "RUG2", ...pumping(400_000) }, now);
+  assert.equal(sibling.verdict.state, "red");
+  assert.equal(sibling.verdict.category, "dev_history");
+});
+
+test("a coin that collapses while held is banned, even when its creator was never seen", () => {
+  // Most rugs are coins the bot met through a pool listing, so there is no launch event and no
+  // known creator. Those used to be forgotten entirely and could be bought again minutes later.
+  const p = pipeline({ ENTRY_MODE: "dip" });
+  const { now, marketCapUsd } = walkToEntry(p, "RUGME");
+  assert.equal(p.executor.status().openPositions, 1);
+  assert.equal(p.devBook.creatorOf("RUGME"), null, "nobody knows who made it");
+
+  // The pool is drained between two polls: -95% in one tick.
+  feed(p, "RUGME", [Math.round(marketCapUsd * 0.05)], now);
+  assert.equal(p.executor.status().openPositions, 0, "it got out at whatever price was left");
+  assert.equal(p.devBook.isBanned("RUGME"), true, "and the coin is banned from now on");
+
+  // Even if it bounces back and looks healthy, bot 2 will not touch it again.
+  const retry = p.screen({ mint: "RUGME", ...pumping(marketCapUsd) }, now + 60_000);
+  assert.equal(retry.verdict.state, "red");
+  assert.equal(retry.verdict.category, "rugged");
 });
 
 // 11 samples over 50s: enough for bot 3 to measure the coin. Drifting up, so no dip yet.
@@ -426,6 +454,48 @@ test("a breakout entry still refuses a vertical candle and a seller-dominated co
   }
   assert.equal(sellers.executor.status().openPositions, 0, "not bought while sellers dominate");
   assert.equal(sellers.executor.status().watching[0].waitingFor, "buyers");
+});
+
+test("one trade can never lose more than the hard ceiling allows", () => {
+  // A jumpy coin's own volatility would earn it a 30% stop; the ceiling overrides that.
+  const p = pipeline({ ENTRY_MODE: "dip", MAX_LOSS_PCT: "0.2" });
+  walkToEntry(p, "WILD");
+  const position = p.executor.status().positions[0];
+  assert.ok(position, "needs a position");
+  assert.ok(position.stopPct <= 0.2 + 1e-9, `stop is ${position.stopPct}, above the 20% ceiling`);
+
+  // The ceiling still cannot squeeze inside the round-trip cost, or the stop fires on the spread.
+  const tight = pipeline({ ENTRY_MODE: "dip", MAX_LOSS_PCT: "0.02" });
+  walkToEntry(tight, "WILD2");
+  const squeezed = tight.executor.status().positions[0];
+  assert.ok(squeezed.stopPct >= 0.06, `stop ${squeezed.stopPct} is inside the 6% round trip`);
+});
+
+test("the emergency exit closes one coin, or all of them", () => {
+  const p = pipeline({ ENTRY_MODE: "breakout", MAX_OPEN_POSITIONS: "3" });
+  let now = 1_700_000_000_000;
+  for (const mint of ["AAA1", "BBB1", "CCC1"]) {
+    now = feed(p, mint, CLIMB, now);
+  }
+  assert.equal(p.executor.status().openPositions, 3);
+
+  // One coin by name.
+  assert.equal(p.executor.closeNow("BBB1", "manual"), 1);
+  const after = p.executor.status();
+  assert.equal(after.openPositions, 2);
+  assert.ok(!after.positions.some((position) => position.mint === "BBB1"));
+  assert.equal(after.closedTrades[0].reason, "manual", "the journal says it was closed by hand");
+
+  // Then everything that is left.
+  assert.equal(p.executor.closeNow(null, "manual"), 2);
+  assert.equal(p.executor.status().openPositions, 0);
+  assert.equal(p.executor.closeNow(null, "manual"), 0, "nothing left to close");
+  assert.equal(p.executor.closeNow("NOPE", "manual"), 0, "a coin that is not held");
+
+  // The money came back: three positions' cost, minus what the round trip cost.
+  const spent = 3 * p.config.buyAmountSol;
+  assert.ok(p.account.balanceSol < p.config.paperStartBalanceSol);
+  assert.ok(p.account.balanceSol > p.config.paperStartBalanceSol - spent);
 });
 
 test("bot 3 holds off when a money limit says no, and keeps watching the coin", () => {

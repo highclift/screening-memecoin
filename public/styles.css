@@ -261,7 +261,7 @@ h1 { margin: 5px 0 3px; font: 700 25px var(--display); letter-spacing: -.9px; }
 .form-message.error { color: var(--bad); }
 .positions-panel, .trades-panel, .activity-panel { overflow: hidden; }
 .positions-list { padding: 4px 17px 8px; }
-.position-row { display: flex; justify-content: space-between; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+.position-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .position-row:last-child { border-bottom: 0; }
 .token-ident { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .token-avatar { display: grid; flex: 0 0 29px; place-items: center; width: 29px; height: 29px; border: 1px solid var(--good-line); border-radius: 9px; color: var(--good); background: var(--good-bg); font: 700 10px var(--mono); }
@@ -482,3 +482,7 @@ td:last-child .trade-mint { margin-left: auto; text-align: right; }
   .tech-details summary { padding-right: 14px; padding-left: 14px; }
   .startup-body .tech-details { margin-right: -18px; margin-left: -18px; }
 }
+
+.positions-actions { display: inline-flex; align-items: center; gap: 9px; }
+.position-close { opacity: .75; }
+.position-close:hover { opacity: 1; color: var(--bad); border-color: var(--bad-line); }

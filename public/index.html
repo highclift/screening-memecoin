@@ -219,7 +219,10 @@
             <section class="panel positions-panel">
               <div class="panel-heading">
                 <div><div class="eyebrow" data-i18n="positions.eyebrow">LATIHAN</div><h3 data-i18n="positions.title">Koin yang dipegang sekarang</h3></div>
-                <span class="count-badge" id="openCount">0</span>
+                <div class="positions-actions">
+                  <button class="button button-danger button-small" id="closeAllButton" type="button" data-i18n="positions.closeAll" data-i18n-attr="title:positions.closeAllHelp">Tutup semua</button>
+                  <span class="count-badge" id="openCount">0</span>
+                </div>
               </div>
               <div id="positionsList" class="positions-list"></div>
             </section>

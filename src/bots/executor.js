@@ -22,9 +22,9 @@ import { currentUtcDay } from "../state.js";
 const HALT_FILE = ".halt";
 const STALE_PRICE_MS = 60_000;
 
-export function createExecutor({ config, universe, journal, account, persist, solUsd, isGreen, log, note }) {
+export function createExecutor({ config, universe, journal, account, persist, solUsd, isGreen, onRug, log, note }) {
   const watchlist = new Map(); // mint -> { addedAt, peak, low, pulledBack, lastHighAt, waitingFor }
-  const stats = { entries: 0, exits: 0, wins: 0, losses: 0, blocked: 0, skippedNoMeasure: 0, dropped: 0 };
+  const stats = { entries: 0, exits: 0, wins: 0, losses: 0, blocked: 0, skippedNoMeasure: 0, dropped: 0, rugs: 0 };
   let blockedReason = "";
 
   const fee = () => config.paperFeeBps / 10_000;
@@ -175,6 +175,17 @@ export function createExecutor({ config, universe, journal, account, persist, so
     if (pnlSol > 0) stats.wins += 1;
     else if (pnlSol < 0) stats.losses += 1;
 
+    // A position that lost most of its value did not drift down — the pool was drained between two
+    // polls. Report it so the coin is banned and its creator counted, whether or not bot 2 ever
+    // saw the collapse from the outside.
+    const collapsed = Number.isFinite(position.entryMarketCapUsd) && position.entryMarketCapUsd > 0
+      && Number.isFinite(marketCapUsd)
+      && marketCapUsd <= position.entryMarketCapUsd * (1 - config.rugDropPct);
+    if (collapsed) {
+      stats.rugs += 1;
+      onRug?.(mint, { entryMarketCapUsd: position.entryMarketCapUsd, exitMarketCapUsd: marketCapUsd });
+    }
+
     journal.write({
       type: "exit",
       mint,
@@ -214,7 +225,7 @@ export function createExecutor({ config, universe, journal, account, persist, so
       stats.skippedNoMeasure += 1;
       return { waitingFor: "measure" };
     }
-    const levels = deriveLevels(volPct, roundTripCostPct(config));
+    const levels = deriveLevels(volPct, roundTripCostPct(config), config.maxLossPct);
 
     // A new high. In "dip" mode that only resets the pullback tracking and we wait; in the other
     // modes it is itself a reason to buy — a coin that climbs steadily never dips, and waiting for
@@ -282,7 +293,7 @@ export function createExecutor({ config, universe, journal, account, persist, so
   // is what ends a winning trade, so a coin that keeps climbing is never cut off at an arbitrary
   // number.
   function exitReasonFor(position, marketCapUsd, now) {
-    const levels = position.levels ?? deriveLevels(null, roundTripCostPct(config));
+    const levels = position.levels ?? deriveLevels(null, roundTripCostPct(config), config.maxLossPct);
     const entry = position.entryMarketCapUsd;
     if (!Number.isFinite(marketCapUsd) || !Number.isFinite(entry) || entry <= 0) return null;
 
@@ -368,7 +379,7 @@ export function createExecutor({ config, universe, journal, account, persist, so
       if (!fresh) {
         // No price at all for a long time is a data problem, not a trade going quiet, so this one
         // is measured from entry rather than from the last high.
-        const levels = position.levels ?? deriveLevels(null, roundTripCostPct(config));
+        const levels = position.levels ?? deriveLevels(null, roundTripCostPct(config), config.maxLossPct);
         if (Number.isFinite(position.lastPrice) && now - position.openedAt >= levels.maxHoldMs) {
           closePosition(mint, position.lastPrice, position.lastMarketCapUsd, "max-hold-stale");
         }
@@ -385,11 +396,33 @@ export function createExecutor({ config, universe, journal, account, persist, so
     }
   }
 
+  // ---------- manual control ----------
+  // The emergency hatch. Sells at the last price this bot saw, which is what a market order would
+  // realistically get, and the normal fee and slippage still apply. Returns how many it closed.
+  function closeNow(mint, reason = "manual") {
+    const mints = mint ? [mint] : Object.keys(account.positions);
+    let closed = 0;
+    for (const target of mints) {
+      const position = account.positions[target];
+      if (!position || !Number.isFinite(position.lastPrice)) continue;
+      closePosition(target, position.lastPrice, position.lastMarketCapUsd, reason);
+      closed += 1;
+    }
+    if (closed) {
+      log(`[bot3] MANUAL EXIT: closed ${closed} position${closed === 1 ? "" : "s"} on request.`);
+      note("exit", closed === 1
+        ? "Posisi ditutup manual dari dashboard."
+        : `${closed} posisi ditutup manual dari dashboard.`, mint ?? "");
+    }
+    return closed;
+  }
+
   return {
     watch,
     unwatch,
     onData,
     sweep,
+    closeNow,
 
     // Bot 1 polls these mints every tick: they are the only coins where a second matters.
     priorityMints() {

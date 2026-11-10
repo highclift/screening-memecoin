@@ -29,6 +29,14 @@ export function createDevBook({ filePath = path.resolve("data", "devbook.json") 
     if (!filePath) return;
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      for (const mint of Array.isArray(parsed.ruggedMints) ? parsed.ruggedMints : []) {
+        if (typeof mint === "string" && mint) ruggedMints.add(mint);
+      }
+      trimSet(ruggedMints, MAX_MINTS);
+      for (const [mint, creator] of Array.isArray(parsed.mintToCreator) ? parsed.mintToCreator : []) {
+        if (typeof mint === "string" && typeof creator === "string") mintToCreator.set(mint, creator);
+      }
+      trimMap(mintToCreator, MAX_MINTS);
       for (const [wallet, stats] of Array.isArray(parsed.creators) ? parsed.creators : []) {
         if (typeof wallet !== "string" || !stats || typeof stats !== "object") continue;
         creators.set(wallet, {
@@ -78,14 +86,26 @@ export function createDevBook({ filePath = path.resolve("data", "devbook.json") 
       dirty = true;
     },
 
+    // A coin that collapsed. Recorded even when the creator is unknown — most rugs are coins this
+    // bot met through a pool listing rather than at launch, and those used to be forgotten
+    // entirely, so the same coin could be bought again minutes later.
     recordRug(mint, now = Date.now()) {
-      const creator = mintToCreator.get(mint);
-      if (!creator || ruggedMints.has(mint)) return false;
+      if (typeof mint !== "string" || !mint || ruggedMints.has(mint)) return false;
       ruggedMints.add(mint);
       trimSet(ruggedMints, MAX_MINTS);
-      touch(creator, now).rugs += 1;
+      const creator = mintToCreator.get(mint);
+      if (creator) touch(creator, now).rugs += 1;
       dirty = true;
       return true;
+    },
+
+    // Banned for good: this exact coin already collapsed once. Survives a restart.
+    isBanned(mint) {
+      return ruggedMints.has(mint);
+    },
+
+    bannedCount() {
+      return ruggedMints.size;
     },
 
     // verdict: "unknown" (creator never seen) | "clean" | "reject"
@@ -112,7 +132,13 @@ export function createDevBook({ filePath = path.resolve("data", "devbook.json") 
       try {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         const tempPath = `${filePath}.tmp`;
-        fs.writeFileSync(tempPath, JSON.stringify({ creators: Array.from(creators.entries()) }), { encoding: "utf8", mode: 0o600 });
+        // The rug list is the valuable part: without it a restart forgets which coins already
+        // collapsed and the bot is free to buy them again.
+        fs.writeFileSync(tempPath, JSON.stringify({
+          creators: Array.from(creators.entries()),
+          ruggedMints: Array.from(ruggedMints),
+          mintToCreator: Array.from(mintToCreator.entries()).slice(-MAX_MINTS),
+        }), { encoding: "utf8", mode: 0o600 });
         fs.renameSync(tempPath, filePath);
         dirty = false;
       } catch (error) {

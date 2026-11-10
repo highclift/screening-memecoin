@@ -56,6 +56,10 @@ export function loadConfig(env = process.env) {
     maxOpenPositions: numberFromEnv(env, "MAX_OPEN_POSITIONS", DEFAULTS.maxOpenPositions, { min: 1, max: 100 }),
     maxEntriesPerDay: numberFromEnv(env, "MAX_ENTRIES_PER_DAY", DEFAULTS.maxEntriesPerDay, { min: 1, max: 10_000 }),
     maxDailyLossSol: numberFromEnv(env, "MAX_DAILY_LOSS_SOL", DEFAULTS.maxDailyLossSol, { min: 0 }),
+    // A hard ceiling on how far one trade may go against us, whatever the coin's own volatility
+    // would have allowed. It caps the derived stop; it cannot save a position from a rug, which
+    // goes from above the stop to near zero between two polls.
+    maxLossPct: numberFromEnv(env, "MAX_LOSS_PCT", 0.2, { min: 0.02, max: 0.9 }),
     paperFeeBps: numberFromEnv(env, "PAPER_FEE_BPS", DEFAULTS.paperFeeBps, { min: 0, max: 5000 }),
     paperSlippageBps: numberFromEnv(env, "PAPER_SLIPPAGE_BPS", DEFAULTS.paperSlippageBps, { min: 0, max: 5000 }),
 
@@ -97,6 +101,14 @@ export function loadConfig(env = process.env) {
     maxTopHoldersPct: numberFromEnv(env, "MAX_TOP_HOLDERS_PCT", 35, { min: 1, max: 100 }),
     topHoldersCount: numberFromEnv(env, "TOP_HOLDERS_COUNT", 5, { min: 1, max: 19 }),
     topHoldersSkipLargest: boolFromEnv(env, "TOP_HOLDERS_SKIP_LARGEST", true),
+    // Authorities the creator should no longer hold. Both are one field on the mint account.
+    requireMintRevoked: boolFromEnv(env, "REQUIRE_MINT_REVOKED", true),
+    requireFreezeRevoked: boolFromEnv(env, "REQUIRE_FREEZE_REVOKED", true),
+    // Top holders sitting in wallets created minutes ago: one actor, several addresses.
+    maxFreshHoldersPct: numberFromEnv(env, "MAX_FRESH_HOLDERS_PCT", 60, { min: 0, max: 100 }),
+    freshWalletMaxTx: numberFromEnv(env, "FRESH_WALLET_MAX_TX", 8, { min: 1, max: 1000 }),
+    freshWalletMaxAgeHours: numberFromEnv(env, "FRESH_WALLET_MAX_AGE_HOURS", 24, { min: 0.1, max: 8760 }),
+    freshWalletLimit: numberFromEnv(env, "FRESH_WALLET_SIGNATURE_LIMIT", 50, { min: 5, max: 1000 }),
 
     // ---- bot 3: which entries it is allowed to take ----
     // dip      = only buy a pullback that bounces (best fill, misses coins that never dip)

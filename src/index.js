@@ -76,6 +76,12 @@ const executor = createExecutor({
   persist,
   solUsd: () => feed.solUsd(),
   isGreen: (mint) => filter.isGreen(mint),
+  // A position that collapsed while held: ban the coin for good and count it against its creator.
+  onRug: (mint, detail) => {
+    if (!devBook.recordRug(mint)) return;
+    journals.filter.write({ type: "rug", mint, source: "held-position", ...detail });
+    log(`[bot2] ${mint.slice(0, 8)} collapsed while held; banned from now on (${devBook.bannedCount()} banned).`);
+  },
   log,
   note,
 });
@@ -166,7 +172,16 @@ process.on("SIGTERM", shutdown);
 
 // The dashboard can only change money limits now; there are no strategy settings left to send.
 process.on("message", (message) => {
-  if (!message || message.type !== "update-settings" || !message.settings) return;
+  if (!message || typeof message !== "object") return;
+
+  // The dashboard's emergency exit: close one coin, or everything.
+  if (message.type === "close-position") {
+    const closed = executor.closeNow(typeof message.mint === "string" ? message.mint : null, "manual");
+    if (process.send) process.send({ type: "closed", closed, mint: message.mint ?? null });
+    return;
+  }
+
+  if (message.type !== "update-settings" || !message.settings) return;
   try {
     config = loadConfig({ ...process.env, ...message.settings, MODE: "paper", PUMPPORTAL_API_KEY: config.apiKey });
     log("[settings] Batas uang diperbarui tanpa restart bot.");

@@ -167,24 +167,29 @@ export function volatilityPct(snapshots = [], { windowMs = 300_000, now = Date.n
 //
 // `costPct` is what a round trip costs (fee + slippage, both sides). No stop may sit inside that:
 // a trailing stop tighter than the spread fires on noise and books a loss the price never made.
-export function deriveLevels(volPct, costPct = 0) {
+export function deriveLevels(volPct, costPct = 0, maxLossPct = 1) {
   const v = finite(volPct) && volPct > 0 ? volPct : 0.03;
   const cost = finite(costPct) && costPct > 0 ? costPct : 0;
+  // The hard ceiling wins over the coin's own volatility, but never squeezes a stop inside the
+  // round-trip cost — a stop there fires on the spread alone.
+  const ceiling = Math.max(finite(maxLossPct) ? maxLossPct : 1, cost * 1.5);
+  const capped = (value) => Math.min(value, ceiling);
   return {
     volPct: round(v, 4),
     costPct: round(cost, 4),
     dipPct: round(clamp(v * 1.2, 0.04, 0.35), 4), // pullback that has to happen before we look at it
     bouncePct: round(clamp(v * 0.6, 0.015, 0.12), 4), // reclaim off the low that confirms buyers returned
 
-    // The flat stop. Fixed at entry, never trails down.
-    stopPct: round(clamp(v * 2.5, Math.max(0.08, cost * 1.5), 0.3), 4),
+    // The flat stop. Fixed at entry, never trails down, and never wider than the hard ceiling.
+    stopPct: round(capped(clamp(v * 2.5, Math.max(0.08, cost * 1.5), 0.3)), 4),
+    maxLossPct: round(ceiling, 4),
     // Once the peak has been this far up, the flat floor ratchets to break-even (entry + costs) and
     // the trail tightens. This is the only thing that ever moves the floor, and only upwards.
     lockPct: round(clamp(v * 3.0, Math.max(0.1, cost * 2), 0.6), 4),
     breakEvenPct: round(cost, 4),
 
     // The trailing take-profit, measured from the highest point since entry.
-    trailPct: round(clamp(v * 2.0, Math.max(0.06, cost * 1.5), 0.25), 4),
+    trailPct: round(capped(clamp(v * 2.0, Math.max(0.06, cost * 1.5), 0.25)), 4),
     // After lockPct it tightens — but only to 1.5x the coin's own move, not 1x. Tightening too far
     // stops a runner out on an ordinary wiggle, which is the opposite of letting profit run.
     tightTrailPct: round(clamp(v * 1.5, Math.max(0.05, cost), 0.2), 4),
@@ -192,10 +197,11 @@ export function deriveLevels(volPct, costPct = 0) {
     // A trade that is NOT in profit and has stopped making highs is not working; one that IS in
     // profit is left alone, because the trailing stop is what should end it.
     stallMs: Math.round(clamp(120_000 * (0.03 / v), 60_000, 600_000)),
-    // Measured from the last new high, not from entry, so a coin still climbing is never cut off.
-    maxHoldMs: 45 * 60_000,
-    // The one absolute ceiling, so nothing is held forever.
-    maxTotalHoldMs: 4 * 3_600_000,
+    // A hard cap measured from ENTRY. These coins pump fast and die fast: in the measured session
+    // every long hold that ended badly was a rug arriving after the move was over, and capping at
+    // ten minutes turned -1.05 SOL into -0.53 SOL across the same trades. It costs a little upside
+    // on the rare coin that keeps climbing, and that is the trade being made deliberately.
+    maxHoldMs: finite(maxHoldMs) && maxHoldMs > 0 ? maxHoldMs : 10 * 60_000,
   };
 }
 

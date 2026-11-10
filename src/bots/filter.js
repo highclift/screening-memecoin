@@ -17,7 +17,7 @@
 
 import { devReason, gateReason, holderReason } from "../filters.js";
 import { pumpScore } from "../signals.js";
-import { fetchHolderStats } from "../holders.js";
+import { fetchSafetyReport } from "../holders.js";
 import { createMeter } from "../meter.js";
 
 const REPEAT_LOG_MS = 5 * 60_000;
@@ -56,9 +56,12 @@ export function createFilter({ config, universe, journal, devBook, log, note, on
     if (holders?.status === "error" && Date.now() < holders.retryAt) return;
     record.holders = { status: "pending" };
     stats.holderChecks += 1;
-    fetchHolderStats(record.mint, config.solanaRpcUrl, {
+    fetchSafetyReport(record.mint, config.solanaRpcUrl, {
       topCount: config.topHoldersCount,
       skipLargest: config.topHoldersSkipLargest,
+      freshWalletLimit: config.freshWalletLimit,
+      freshWalletMaxTx: config.freshWalletMaxTx,
+      freshWalletMaxAgeHours: config.freshWalletMaxAgeHours,
     })
       .then((result) => {
         record.holders = { status: "ok", ...result };
@@ -137,6 +140,11 @@ export function createFilter({ config, universe, journal, devBook, log, note, on
 
   // The whole decision for one coin, in order of cost.
   function judge(record, now) {
+    // A coin that has already collapsed once is never bought again, whatever it looks like now.
+    // A rug often bounces off the floor and can score well on the way back up.
+    if (devBook.isBanned(record.mint)) {
+      return { state: "red", category: "rugged", detail: "this coin already collapsed once" };
+    }
     const dev = devReason(devBook.assess(record.mint, config));
     if (dev) return { state: "red", ...dev };
 
