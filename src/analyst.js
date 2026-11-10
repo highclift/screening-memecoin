@@ -1,3 +1,5 @@
+import { buyerCount } from "./strategy.js";
+
 // Scores a candidate that already passed the hard filters. Every feature is scaled to 0..1 and
 // unknown data counts as a neutral 0.5, so missing data neither helps nor hurts.
 //
@@ -21,7 +23,7 @@ export function scoreCandidate(candidate, config, { dev = null, holders = null }
   const parts = {};
 
   parts.buyRatio = candidate.trades > 0 ? clamp01((candidate.buys / candidate.trades - 0.5) / 0.3) : 0;
-  parts.buyerBreadth = clamp01(candidate.buyers.size / (config.minUniqueBuyers * 2));
+  parts.buyerBreadth = clamp01(buyerCount(candidate) / (config.minUniqueBuyers * 2));
 
   const rebound = candidate.lowMarketCapUsd > 0 ? candidate.currentMarketCapUsd / candidate.lowMarketCapUsd - 1 : 0;
   parts.rebound = Number.isFinite(rebound) ? clamp01(rebound / (config.bouncePct * 3)) : 0;

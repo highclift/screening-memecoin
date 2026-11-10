@@ -10,6 +10,14 @@ export function liquidityReason(candidate, config) {
   return null;
 }
 
+export function volumeReason(candidate, config) {
+  if (!(config.minVolumeH1Usd > 0) || !Number.isFinite(candidate.volumeH1Usd)) return null;
+  if (candidate.volumeH1Usd < config.minVolumeH1Usd) {
+    return `1h volume $${Math.round(candidate.volumeH1Usd).toLocaleString("en-US")} below $${Math.round(config.minVolumeH1Usd).toLocaleString("en-US")}`;
+  }
+  return null;
+}
+
 export function holderReason(holders, config) {
   if (!holders || holders.status !== "ok" || !Number.isFinite(holders.topPct)) return null;
   if (holders.topPct > config.maxTopHoldersPct) {

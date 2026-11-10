@@ -1,3 +1,6 @@
+import { boolFromEnv, numberFromEnv } from "./envutil.js";
+import { buildLanes } from "./lanes.js";
+
 const DEFAULTS = {
   paperStartBalanceSol: 1,
   buyAmountSol: 0.01,
@@ -19,24 +22,6 @@ const DEFAULTS = {
   paperSlippageBps: 200,
   maxDailyLossSol: 0.05,
 };
-
-function numberFromEnv(env, name, fallback, { min = 0, max = Number.POSITIVE_INFINITY } = {}) {
-  const raw = env[name];
-  const value = raw === undefined || raw.trim() === "" ? fallback : Number(raw);
-  if (!Number.isFinite(value) || value < min || value > max) {
-    throw new Error(`${name} must be a number between ${min} and ${max}.`);
-  }
-  return value;
-}
-
-function boolFromEnv(env, name, fallback) {
-  const raw = env[name];
-  if (raw === undefined || raw.trim() === "") return fallback;
-  const value = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(value)) return true;
-  if (["0", "false", "no", "off"].includes(value)) return false;
-  throw new Error(`${name} must be true or false.`);
-}
 
 export function loadConfig(env = process.env) {
   const mode = (env.MODE ?? "paper").trim().toLowerCase();
@@ -115,6 +100,11 @@ export function loadConfig(env = process.env) {
     maxTopHoldersPct: numberFromEnv(env, "MAX_TOP_HOLDERS_PCT", 35, { min: 1, max: 100 }),
     topHoldersCount: numberFromEnv(env, "TOP_HOLDERS_COUNT", 5, { min: 1, max: 19 }),
     topHoldersSkipLargest: boolFromEnv(env, "TOP_HOLDERS_SKIP_LARGEST", true),
+
+    // Discovery of already-trading tokens for the young / veteran lanes (GeckoTerminal free API).
+    discoveryTickMs: numberFromEnv(env, "DISCOVERY_TICK_MS", 15_000, { min: 1000, max: 600_000 }),
+    geckoRefreshMs: numberFromEnv(env, "GECKO_REFRESH_MS", 20_000, { min: 1000, max: 600_000 }),
+    geckoCallsPerMinute: numberFromEnv(env, "GECKO_CALLS_PER_MINUTE", 24, { min: 1, max: 30 }),
   };
 
   if (c.minMarketCapUsd > c.maxMarketCapUsd) {
@@ -126,5 +116,7 @@ export function loadConfig(env = process.env) {
   if (c.buyAmountSol > c.paperStartBalanceSol) {
     throw new Error("BUY_AMOUNT_SOL cannot exceed PAPER_START_BALANCE_SOL.");
   }
+  const base = { ...c };
+  c.lanes = buildLanes(env, base);
   return c;
 }

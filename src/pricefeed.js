@@ -1,4 +1,4 @@
-// Free market-data source for migrated Pump.fun tokens (no PumpPortal trade subscription needed).
+// Free market-data source for tokens that are already trading (no PumpPortal trade subscription needed).
 //  - DexScreener : price + buy/sell counts, up to 30 tokens per request (bulk polling)
 //  - GeckoTerminal: recent trades of ONE pool, used only to count unique buyers (lazy, rate limited)
 // Pump.fun tokens have a fixed 1,000,000,000 supply. Prices are kept in SOL
@@ -28,8 +28,16 @@ async function getJson(url, timeoutMs = 8000, fetchImpl = fetch) {
   }
 }
 
-// Returns Map<mint, {price, marketCapUsd, solUsd, trades, buys, sells, pool, liquidityUsd}>.
-// `price` is market cap in SOL, matching PumpPortal's price unit.
+function positive(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Returns Map<mint, {price, marketCapUsd, reportedMarketCapUsd, solUsd, trades, buys, sells,
+//   tradesH1, buysH1, volumeH1, volumeH24, priceChangeH1, pairCreatedAt, pool, liquidityUsd, socials}>.
+// `price` / `marketCapUsd` assume the 1B Pump.fun supply (fresh lane). `reportedMarketCapUsd` is what
+// DexScreener itself reports (marketCap, else fdv): the age lanes use that because older tokens do not
+// have a 1B supply. `trades`/`buys` are the last 5 minutes, `tradesH1`/`buysH1` the last hour.
 export async function fetchDexSnapshots(mints, fetchImpl = fetch) {
   const out = new Map();
   if (!mints.length) return out;
@@ -49,15 +57,25 @@ export async function fetchDexSnapshots(mints, fetchImpl = fetch) {
     const previous = out.get(mint);
     if (previous && previous.liquidityUsd >= liquidityUsd) continue; // keep the deepest pool
     const m5 = pair?.txns?.m5 ?? {};
+    const h1 = pair?.txns?.h1 ?? {};
     const buys = Number(m5.buys) || 0;
     const sells = Number(m5.sells) || 0;
+    const buysH1 = Number(h1.buys) || 0;
+    const sellsH1 = Number(h1.sells) || 0;
     out.set(mint, {
       price: priceNative * SUPPLY,
       marketCapUsd: priceUsd * SUPPLY,
+      reportedMarketCapUsd: positive(pair.marketCap) ?? positive(pair.fdv),
       solUsd,
       buys,
       sells,
       trades: buys + sells,
+      buysH1,
+      tradesH1: buysH1 + sellsH1,
+      volumeH1: Number(pair?.volume?.h1) || 0,
+      volumeH24: Number(pair?.volume?.h24) || 0,
+      priceChangeH1: Number.isFinite(Number(pair?.priceChange?.h1)) ? Number(pair.priceChange.h1) : null,
+      pairCreatedAt: Number(pair.pairCreatedAt) || null,
       pool: pair.pairAddress ?? "",
       liquidityUsd,
       socials: parseDexInfo(pair.info),

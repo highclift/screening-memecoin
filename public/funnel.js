@@ -1,95 +1,66 @@
-// Funnel panel for the screener: shows why tokens dropped out and how many reached the analyst.
-// Loaded before app.js; app.js calls renderFunnel(status) from renderScreener().
-// It builds its own DOM inside #screener and reuses the existing dashboard CSS classes.
+// Funnel panel for the watchlist: why coins dropped out, and how many were fully scored.
+// app.js calls renderFunnel(status) from renderScreener(). Builds its own DOM inside #screener
+// and reuses the existing dashboard CSS classes.
 
-const FUNNEL_LABELS = {
-  market_cap: "Market cap di luar range",
-  capacity: "Kapasitas screening penuh",
-  dev_history: "Riwayat dev buruk",
-  social: "Tautan sosial tidak memenuhi syarat",
-  liquidity: "Likuiditas terlalu kecil",
-  holders: "Holder terlalu terkonsentrasi",
-};
-
-const EXPIRY_LABELS = {
-  blocked: "Habis waktu: terhalang batas risiko",
-  social: "Habis waktu: menunggu data sosial",
-  trades: "Habis waktu: trade kurang",
-  buys: "Habis waktu: buy kurang",
-  buyers: "Habis waktu: pembeli unik kurang",
-  pullback: "Habis waktu: belum ada pullback",
-  rebound: "Habis waktu: belum ada pantulan",
-  holders: "Habis waktu: menunggu data holder",
-  score: "Habis waktu: skor di bawah batas",
-  signal: "Habis waktu: sinyal tidak sempat dieksekusi",
-};
-
+// Rejection categories come from recordReject() in src/index.js; expiry categories arrive as
+// "expired:<stageKey>" and reuse the stage dictionary.
 function funnelLabel(category) {
   if (category.startsWith("expired:")) {
-    const stage = category.slice("expired:".length);
-    return EXPIRY_LABELS[stage] ?? `Habis waktu: ${stage}`;
+    const stageKey = category.slice("expired:".length);
+    const stage = t(`stage.${stageKey}`);
+    return t("funnel.expired", { stage: (stage === `stage.${stageKey}` ? stageKey : stage).toLowerCase() });
   }
-  return FUNNEL_LABELS[category] ?? category;
+  const label = t(`funnel.${category}`);
+  return label === `funnel.${category}` ? category : label;
 }
 
-function ensureFunnelPanel() {
-  let panel = document.querySelector("#funnelPanel");
-  if (panel) return panel;
+const FUNNEL_TILES = [
+  ["funnel.scored", "funnelScored"],
+  ["funnel.scoreBlocked", "funnelScoreBlocked"],
+  ["funnel.devUnknown", "funnelDevUnknown"],
+  ["funnel.holderCheck", "funnelHolderCheck"],
+];
+
+// The four summary tiles are injected as a second stats row; the list itself lives in index.html.
+function ensureFunnelTiles() {
+  let row = document.querySelector("#funnelTiles");
+  if (row) return row;
   const anchor = document.querySelector("#screener .screener-stats");
   if (!anchor) return null;
 
-  panel = document.createElement("div");
-  panel.id = "funnelPanel";
-
-  const stats = document.createElement("div");
-  stats.className = "screener-stats";
-  for (const [label, id] of [
-    ["Dinilai analyst", "funnelScored"],
-    ["Ditahan skor", "funnelScoreBlocked"],
-    ["Dev tanpa data", "funnelDevUnknown"],
-    ["Cek holder (RPC)", "funnelHolderCheck"],
-  ]) {
+  row = document.createElement("div");
+  row.id = "funnelTiles";
+  row.className = "screener-stats funnel-tiles";
+  for (const [labelKey, id] of FUNNEL_TILES) {
     const tile = document.createElement("div");
     const caption = document.createElement("span");
-    caption.textContent = label;
+    caption.dataset.i18n = labelKey;
+    caption.textContent = t(labelKey);
     const value = document.createElement("strong");
     value.id = id;
     value.textContent = "0";
     tile.append(caption, value);
-    stats.append(tile);
+    row.append(tile);
   }
-
-  const heading = document.createElement("div");
-  heading.className = "screener-subheading";
-  const title = document.createElement("strong");
-  title.textContent = "Mengapa token gugur";
-  const note = document.createElement("span");
-  note.textContent = "sejak scanner dimulai";
-  heading.append(title, note);
-
-  const list = document.createElement("div");
-  list.className = "screener-debug-list";
-  list.id = "funnelList";
-
-  panel.append(stats, heading, list);
-  anchor.after(panel);
-  return panel;
+  anchor.after(row);
+  return row;
 }
 
 function renderFunnel(status = {}) {
-  if (!ensureFunnelPanel()) return;
-  document.querySelector("#funnelScored").textContent = String(status.scored ?? 0);
-  document.querySelector("#funnelScoreBlocked").textContent = String(status.scoreBlocked ?? 0);
-  document.querySelector("#funnelDevUnknown").textContent = String(status.devUnknown ?? 0);
-  document.querySelector("#funnelHolderCheck").textContent = status.holderCheck ? "Aktif" : "Mati";
+  if (!ensureFunnelTiles()) return;
+  setNumber(document.querySelector("#funnelScored"), status.scored ?? 0, fmtInt);
+  setNumber(document.querySelector("#funnelScoreBlocked"), status.scoreBlocked ?? 0, fmtInt);
+  setNumber(document.querySelector("#funnelDevUnknown"), status.devUnknown ?? 0, fmtInt);
+  setText(document.querySelector("#funnelHolderCheck"), status.holderCheck ? t("funnel.on") : t("funnel.off"));
 
   const list = document.querySelector("#funnelList");
+  if (!list) return;
   list.replaceChildren();
   const rows = Object.entries(status.funnel ?? {}).sort((a, b) => b[1] - a[1]);
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "Belum ada token yang gugur.";
+    empty.textContent = t("funnel.empty");
     list.append(empty);
     return;
   }
@@ -98,11 +69,11 @@ function renderFunnel(status = {}) {
     const row = document.createElement("div");
     row.className = "screener-debug-row info";
     const countCell = document.createElement("span");
-    countCell.className = "log-time";
-    countCell.textContent = String(count);
+    countCell.className = "log-time funnel-count";
+    countCell.textContent = fmtInt(count);
     const label = document.createElement("span");
     label.className = "screener-debug-message";
-    label.textContent = `${funnelLabel(category)} (${((count / scanned) * 100).toFixed(0)}% dari yang ditemukan)`;
+    label.textContent = `${funnelLabel(category)} — ${t("funnel.share", { pct: ((count / scanned) * 100).toFixed(0) })}`;
     row.append(countCell, label);
     list.append(row);
   }

@@ -41,9 +41,15 @@ export function updateLevels(candidate, marketCapUsd, config) {
   }
 }
 
+// Unique buyers: normally the set collected by this bot; the age lanes get a count from
+// GeckoTerminal instead (`buyersOverride`).
+export function buyerCount(candidate) {
+  return Number.isFinite(candidate.buyersOverride) ? candidate.buyersOverride : candidate.buyers.size;
+}
+
 export function shouldEnter(candidate, marketCapUsd, config) {
   if (!candidate.pulledBack || candidate.trades < config.minTrades) return false;
-  if (candidate.buys < config.minBuys || candidate.buyers.size < config.minUniqueBuyers) return false;
+  if (candidate.buys < config.minBuys || buyerCount(candidate) < config.minUniqueBuyers) return false;
   if (!Number.isFinite(marketCapUsd) || marketCapUsd < config.minMarketCapUsd || marketCapUsd > config.maxMarketCapUsd) return false;
   if (!(candidate.lowMarketCapUsd > 0)) return false;
   return marketCapUsd >= candidate.lowMarketCapUsd * (1 + config.bouncePct);
