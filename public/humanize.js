@@ -31,6 +31,13 @@ function reasonKeyFromDetail(detail) {
   if (text.includes("market cap")) return "market_cap";
   if (text.startsWith("liquidity") || text.includes(" liquidity ")) return "liquidity";
   if (text.includes("trades in the last hour")) return "dead";
+  // Buyer-count reasons first: both mention volume or holders in passing.
+  if (text.includes("different wallets bought")) return "few_buyers";
+  if (text.includes("trades from only")) return "wash_trading";
+  if (text.includes("wallets sold against")) return "distribution";
+  if (text.includes("share one funder")) return "wallet_cluster";
+  if (text.includes("linked by funding")) return "linked_supply";
+  if (text.includes("funded by one wallet")) return "linked_wallets";
   if (text.includes("volume")) return "dead_volume";
   if (text.includes("holders own") || text.includes("holders")) return "holders";
   if (text.includes("rugged") || text.includes("launched")) return "dev_history";
@@ -59,9 +66,18 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// The analyst's score is a whole number out of 100.
 function fmtScore(score) {
   const value = numberOrNull(score);
-  return value === null ? "—" : value.toFixed(2);
+  return value === null ? "—" : `${Math.round(value)}`;
+}
+
+// How much of the score was actually measured rather than left neutral. A 72 built from four
+// readings and two neutrals is a weaker 72 than one built from six, and the column says so.
+function measuredText(coin = {}) {
+  const measured = numberOrNull(coin.measured);
+  if (measured === null) return "—";
+  return t("frag.measured", { measured, of: 6 });
 }
 
 // What bot 3 is waiting for on one coin it may buy, with the level it worked out itself.
@@ -131,63 +147,81 @@ const EXIT_KEY = {
 // Each matcher: [regex, builder]. The builder gets the match and returns the feed item.
 const MATCHERS = [
   // ---------- worker: startup banner ----------
-  [/^\[start\] mode=\S+ paper balance=([\d.]+) SOL, ([\d.]+) SOL per trade/i, (m) => ({
+  [/^\[start\] mode=\S+ paper balance=([\d.]+) SOL, (\d+)% per trade \(([\d.]+) SOL now\)/i, (m) => ({
     key: "ev.start",
-    params: { balance: `${Number(m[1]).toFixed(4)} SOL`, buy: `${Number(m[2])} SOL` },
+    params: { balance: `${Number(m[1]).toFixed(4)} SOL`, pct: m[2], buy: `${Number(m[3]).toFixed(4)} SOL` },
     tone: "info",
     icon: "▶",
   })],
-  [/^\[pipeline\] bot 2 turns a coin green at score ([\d.]+)/i, (m) => ({
-    key: "ev.greenScore",
-    params: { score: m[1] },
+  [/^\[desk\] window (\S+) old, (\S+) \| pass mark (\d+)\/100 \| stop -(\d+)%, trail (\d+)% once \+(\d+)%/i, (m) => ({
+    key: "ev.deskWindow",
+    params: { age: m[1], size: m[2], score: m[3], stop: m[4], trail: m[5], after: m[6] },
+    tone: "info",
+    icon: "⌗",
+  })],
+  [/^\[desk\] safety: LP >= (\d+)% burned\/locked, dev <= (\d+)%, bundled <= (\d+)%/i, (m) => ({
+    key: "ev.deskSafety",
+    params: { lp: m[1], dev: m[2], bundled: m[3] },
     tone: "info",
     icon: "⧩",
     bot: "filter",
   })],
-  [/^\[pipeline\]/i, () => ({ key: "ev.pipeline", params: {}, tone: "info", icon: "⌗" })],
+  [/^\[desk\]/i, () => ({ key: "ev.pipeline", params: {}, tone: "info", icon: "⌗" })],
   [/^\[shutdown\]/i, () => ({ key: "ev.shutdown", params: {}, tone: "muted", icon: "■" })],
 
-  // ---------- bot 1: screening ----------
-  [/^\[bot1\] Screening every coin, any age: (\d+) GeckoTerminal pages round-robin at (\d+) calls\/min, evenly paced \+ every known coin re-checked on DexScreener at (\d+) coins\/min/i, (m) => ({
-    key: "ev.bot1.started",
-    params: { pages: m[1], rate: m[2], recheck: m[3] },
+  // ---------- agent 1: scout ----------
+  [/^\[scout\] Window: (\S+) old, (\S+) market cap\./i, (m) => ({
+    key: "ev.scout.started",
+    params: { age: m[1], size: m[2] },
     tone: "info",
     icon: "◎",
-    bot: "screener",
+    bot: "scout",
   })],
-  [/^\[bot1\] (?:sweep|refresh) error: (.+)$/i, (m) => ({
-    key: "ev.bot1.error",
+  [/^\[scout\] (?:sweep|refresh) error: (.+)$/i, (m) => ({
+    key: "ev.scout.error",
     params: { detail: m[1] },
     tone: "warn",
     icon: "⚠",
-    bot: "screener",
+    bot: "scout",
   })],
 
-  // ---------- bot 2: filtering ----------
-  [/^\[bot2\] GREEN (.+?) score=([\d.]+) \(([^,)]+)(?:, volume ([\d.]+)x its normal hour|, ([\d.]+)x the pool traded in an hour)?\) age=(\S+)/i, (m) => ({
-    key: m[4] ? "ev.bot2.greenSurge" : m[5] ? "ev.bot2.greenTurnover" : "ev.bot2.green",
-    params: { token: tokenLabel(m[1]), score: m[2], reason: leadText(m[3]), times: m[4] ?? m[5] ?? "", age: m[6] },
+  // ---------- agent 2: filter ----------
+  [/^\[filter\] (\S+) collapsed while held; banned from now on/i, (m) => ({
+    key: "ev.banned",
+    params: { token: tokenLabel(m[1]) },
+    tone: "bad",
+    icon: "⛔",
+    bot: "filter",
+  })],
+
+  // ---------- agent 3: analyst ----------
+  [/^\[analyst\] (.+?) scores (\d+)\/100 \(([a-zA-Z]+) leading, (\d+\/\d+) parts measured\)/i, (m) => ({
+    key: "ev.analyst.pass",
+    params: { token: tokenLabel(m[1]), score: m[2], reason: leadText(m[3]), measured: m[4] },
     tone: "good",
-    icon: "⧩",
-    bot: "filter",
-  })],
-  [/^\[bot2\] (.+?) is no longer green: (.+?)\.?$/i, (m) => ({
-    key: "ev.bot2.ungreen",
-    params: { token: tokenLabel(m[1]), reason: categoryLabel(reasonKeyFromDetail(m[2])) },
-    tone: "muted",
-    icon: "⊘",
-    bot: "filter",
+    icon: "◈",
+    bot: "analyst",
   })],
 
-  // ---------- bot 3: execution ----------
-  [/^\[bot3\] BUY (.+?) MC=(\S+) after a ([\d.]+)% dip and a ([\d.]+)% bounce \| stop ([\d.]+)% trail ([\d.]+)% \(this coin moves ~([\d.]+)%\/min\)/i, (m) => ({
-    key: "ev.bot3.buy",
-    params: { token: tokenLabel(m[1]), mc: m[2], dip: m[3], bounce: m[4], stop: m[5], trail: m[6], vol: m[7] },
+  // ---------- agent 4: executor ----------
+  [/^\[executor\] BUY (.+?) (\S+) score=(\d+|\?) (\S+) \| ([\d.]+) SOL, stop -(\d+)%, trail (\d+)% after \+(\d+)%/i, (m) => ({
+    key: "ev.executor.buy",
+    params: {
+      token: tokenLabel(m[1]), mc: m[2], score: m[3], trigger: m[4],
+      size: `${Number(m[5]).toFixed(4)} SOL`, stop: m[6], trail: m[7], after: m[8],
+    },
     tone: "good",
     icon: "▲",
     bot: "executor",
   })],
-  [/^\[bot3\] SELL:([a-z-]+) (.+?) MC=(\S+) pnl=([+-]?[\d.]+) SOL/i, (m) => {
+  [/^\[executor\] MANUAL EXIT: closed (\d+) position/i, (m) => ({
+    key: "ev.manualExit",
+    params: { count: m[1] },
+    tone: "warn",
+    icon: "■",
+    bot: "executor",
+  })],
+  [/^\[executor\] SELL:([a-z-]+) (.+?) (\S+) pnl=([+-]?[\d.]+) SOL/i, (m) => {
     const pnl = Number(m[4]);
     return {
       key: EXIT_KEY[m[1]] ?? "ev.exit.other",
@@ -198,14 +232,6 @@ const MATCHERS = [
     };
   }],
 
-  [/^[bot2] (S+) collapsed while held; banned from now on/i, (m) => ({
-    key: "ev.banned",
-    params: { token: tokenLabel(m[1]) },
-    tone: "bad",
-    icon: "⛔",
-    bot: "filter",
-  })],
-
   // ---------- worker: feed ----------
   // Being rate limited is a speed limit, not a failure: the other sources keep going, so this is a
   // calm one-line notice rather than a red error.
@@ -214,21 +240,21 @@ const MATCHERS = [
     params: { seconds: m[1], rate: m[2] },
     tone: "warn",
     icon: "⏸",
-    bot: "screener",
+    bot: "scout",
   })],
   [/^\[feed\] GeckoTerminal back at full speed \((\d+) calls\/min\)/i, (m) => ({
     key: "ev.geckoRecovered",
     params: { rate: m[1] },
     tone: "good",
     icon: "⚡",
-    bot: "screener",
+    bot: "scout",
   })],
   [/^\[feed\] GeckoTerminal (\w+) page (\d+) failed: (.+)$/i, (m) => ({
     key: "ev.geckoPageFailed",
     params: { page: m[2], detail: m[3] },
     tone: "warn",
     icon: "⚠",
-    bot: "screener",
+    bot: "scout",
   })],
   [/^\[feed\] PumpPortal connected/i, () => ({ key: "ev.feedConnected", params: {}, tone: "good", icon: "⚡" })],
   [/^\[feed\] PumpPortal disconnected; reconnecting in (\d+)s/i, (m) => ({

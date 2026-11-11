@@ -1,8 +1,12 @@
-// What the three bots actually did, read back from their own logs.
-//   data/bot1-screened.jsonl  what bot 1 saw
-//   data/bot2-filtered.jsonl  what bot 2 made of it
-//   data/bot3-trades.jsonl    what bot 3 did about it
+// What the desk actually did, read back from its own logs.
+//   data/scout.jsonl   what the scout saw
+//   data/kills.jsonl   every refusal, from any agent, with the reason — and every pass
+//   data/trades.jsonl  what the executor did about the ones that got through
 // Usage: npm run report
+//
+// The kill log is the point of this report. A desk that only logs its trades can tell you what it
+// won and lost; this one can tell you what it refused, which agent refused it, and therefore which
+// rule is actually shaping the night.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -24,9 +28,9 @@ function read(name) {
   return { records, skipped };
 }
 
-const bot1 = read("bot1-screened.jsonl");
-const bot2 = read("bot2-filtered.jsonl");
-const bot3 = read("bot3-trades.jsonl");
+const bot1 = read("scout.jsonl");
+const bot2 = read("kills.jsonl");
+const bot3 = read("trades.jsonl");
 
 if (!bot1.records.length && !bot2.records.length && !bot3.records.length) {
   console.log("No logs yet in data/. Run the bot first (npm start or npm run bot).");
@@ -74,8 +78,8 @@ function span(records) {
 
 console.log("Paper results only: they ignore latency, failed sells and rugs you cannot exit.\n");
 
-// ---------- BOT 1 ----------
-console.log("== BOT 1: SCREENING ==");
+// ---------- SCOUT ----------
+console.log("== AGENT 1: SCOUT ==");
 if (!bot1.records.length) console.log("nothing logged yet");
 else {
   const minutes = span(bot1.records);
@@ -85,31 +89,34 @@ else {
   console.log(`age of coins screened: ${list(counted(firstSightings.map((r) => ({ bucket: ageBucket(r.ageSeconds) })), "bucket"))}`);
 }
 
-// ---------- BOT 2 ----------
-console.log("\n== BOT 2: FILTERING ==");
+// ---------- THE FUNNEL: EVERY KILL, BY AGENT ----------
+console.log("\n== THE FUNNEL: WHAT WAS REFUSED, AND BY WHOM ==");
 if (!bot2.records.length) console.log("nothing logged yet");
 else {
-  const verdicts = bot2.records.filter((r) => r.type === "verdict" || r.type === "recheck");
-  const greens = verdicts.filter((r) => r.state === "green");
-  console.log(`judgements ${verdicts.length} | green ${greens.length} (${pct(greens.length, verdicts.length)}) | watch ${verdicts.filter((r) => r.state === "watch").length} | red ${verdicts.filter((r) => r.state === "red").length} | rugs seen ${bot2.records.filter((r) => r.type === "rug").length}`);
-  console.log(`why coins were turned down: ${list(counted(verdicts.filter((r) => r.state === "red"), "category"))}`);
-  const rugs = bot2.records.filter((r) => r.type === "rug");
-  if (rugs.length) console.log(`coins banned after collapsing: ${rugs.length} (never bought again)`);
-  if (greens.length) {
-    console.log(`green coins by age: ${list(counted(greens.map((r) => ({ bucket: ageBucket(r.ageSeconds) })), "bucket"))}`);
-    console.log(`what made them green: ${list(counted(greens, "lead"))}`);
-    const surges = greens.map((r) => r.surgeRatio).filter(Number.isFinite).sort((a, b) => a - b);
-    if (surges.length) {
-      console.log(`volume vs their own normal hour: median ${surges[Math.floor(surges.length / 2)].toFixed(1)}x, best ${surges[surges.length - 1].toFixed(1)}x`);
-    }
-    // A pipeline that only ever greenlights brand-new coins is not doing the job this split was for.
-    const revived = greens.filter((r) => Number.isFinite(r.ageSeconds) && r.ageSeconds >= 86_400).length;
-    console.log(`coins older than a day that went green: ${revived} (${pct(revived, greens.length)}) — this is the "pump again" case`);
+  const kills = bot2.records.filter((r) => r.type === "kill");
+  const passes = bot2.records.filter((r) => r.type === "pass");
+  console.log(`kills ${kills.length} | coins that cleared the filter ${passes.filter((r) => r.stage === "filter").length} | coins the analyst passed ${passes.filter((r) => r.stage === "analyst").length}`);
+  console.log(`by agent: ${list(counted(kills, "stage"))}`);
+
+  // Per agent, because one stage's reasons are not comparable with another's: the scout turns away
+  // most of the world on the window alone, and that number would bury everything else.
+  for (const stage of ["scout", "filter", "analyst", "risk"]) {
+    const mine = kills.filter((r) => r.stage === stage);
+    if (!mine.length) continue;
+    console.log(`  ${stage.padEnd(9)} ${String(mine.length).padStart(6)} | ${list(counted(mine, "category"), 8)}`);
   }
+
+  const scored = kills.filter((r) => r.stage === "analyst" && Number.isFinite(r.score));
+  if (scored.length) {
+    const values = scored.map((r) => r.score).sort((a, b) => a - b);
+    console.log(`scores of the coins the analyst refused: median ${values[Math.floor(values.length / 2)]}, best ${values[values.length - 1]} (pass mark is what to compare these with)`);
+  }
+  const rugs = bot2.records.filter((r) => r.type === "rug");
+  if (rugs.length) console.log(`coins banned after collapsing while held: ${rugs.length} (never bought again)`);
 }
 
-// ---------- BOT 3 ----------
-console.log("\n== BOT 3: EXECUTION ==");
+// ---------- EXECUTOR + RISK ----------
+console.log("\n== AGENTS 4 & 5: EXECUTION AND RISK ==");
 if (!bot3.records.length) console.log("nothing logged yet");
 else {
   const entries = bot3.records.filter((r) => r.type === "entry");
@@ -131,8 +138,8 @@ else {
   }
   if (entries.length) {
     console.log(`entries by coin age: ${list(counted(entries.map((r) => ({ bucket: ageBucket(r.ageSeconds) })), "bucket"))}`);
-    const blocked = bot3.records.filter((r) => r.type === "blocked");
-    if (blocked.length) console.log(`entries held back by a money limit: ${list(counted(blocked, "reason"))}`);
+    const blocked = bot2.records.filter((r) => r.stage === "risk");
+    if (blocked.length) console.log(`entries held back by a money limit: ${list(counted(blocked, "detail"))}`);
   }
 
   // Pair each exit with the entry before it, then slice the outcomes two ways.
@@ -154,7 +161,7 @@ else {
       trigger.pnl += pnl;
 
       if (!Number.isFinite(entry.score)) continue;
-      const key = entry.score >= 0.8 ? "0.80+" : entry.score >= 0.7 ? "0.70-0.79" : entry.score >= 0.6 ? "0.60-0.69" : "below 0.60";
+      const key = entry.score >= 90 ? "90+" : entry.score >= 80 ? "80-89" : entry.score >= 70 ? "70-79" : "below 70";
       const score = bucket(byScore, key);
       score.trades += 1;
       if (won) score.wins += 1;
@@ -173,7 +180,9 @@ else {
   // Which one is actually paying is a question only the journal can answer.
   table("entry trigger vs outcome (is the dip or the breakout making the money?):",
     Object.entries(byTrigger).sort((a, b) => b[1].trades - a[1].trades));
-  table("bot 2 score vs outcome (does a higher score actually win more?):",
+  // The question the whole analyst exists to answer. If the high buckets do not out-earn the low
+  // ones over a few hundred trades, the weights in DESK_WEIGHTS are decoration.
+  table("analyst score vs outcome (does a higher score actually win more?):",
     Object.entries(byScore).sort((a, b) => b[0].localeCompare(a[0])));
 }
 

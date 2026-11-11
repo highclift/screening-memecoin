@@ -1,5 +1,5 @@
-// The handoff: bot 1 screens -> bot 2 judges -> bot 3 buys and sells.
-// Everything here runs offline; the feed is a stub and the clock is passed in.
+// The handoffs: scout -> filter -> analyst -> executor <-> risk, with the logger underneath.
+// Everything here runs offline; the feed, RugCheck and the clock are all stubbed.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -10,16 +10,21 @@ import { loadConfig } from "../src/config.js";
 import { createUniverse } from "../src/universe.js";
 import { createJournal } from "../src/journal.js";
 import { createDevBook } from "../src/devbook.js";
-import { createFilter } from "../src/bots/filter.js";
-import { createExecutor } from "../src/bots/executor.js";
-import { createScreener } from "../src/bots/screener.js";
+import { createSmartWallets } from "../src/smartwallets.js";
+import { createLogger } from "../src/agents/logger.js";
+import { createFilter } from "../src/agents/filter.js";
+import { createAnalyst } from "../src/agents/analyst.js";
+import { createRisk } from "../src/agents/risk.js";
+import { createExecutor } from "../src/agents/executor.js";
+import { windowReason } from "../src/agents/scout.js";
 import { freshState } from "../src/state.js";
 
 const SOL_USD = 150;
-const tmpFile = (name) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "chain-")), name);
+const START = 1_700_000_000_000;
+const tmpFile = (name) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "desk-")), name);
 
-// A coin that is clearly pumping, with whatever market cap the test asks for.
-const pumping = (marketCapUsd, extra = {}) => ({
+// A coin that is trading well, at whatever market cap the test asks for.
+const healthy = (marketCapUsd, extra = {}) => ({
   marketCapUsd,
   liquidityUsd: Math.round(marketCapUsd * 0.15),
   volumeH24Usd: 240_000,
@@ -28,617 +33,372 @@ const pumping = (marketCapUsd, extra = {}) => ({
   sellsH1: 180,
   tradesH1: 600,
   buyersH1: 150,
+  sellersH1: 90,
   priceChangeH1: 22,
   ...extra,
 });
 
-// Builds the three bots over one universe, with the journals pointed at a temp directory.
-function pipeline(settings = {}) {
+// A RugCheck report with nothing wrong with it. Tests override one field at a time.
+const cleanReport = (overrides = {}) => ({
+  mintAuthority: null,
+  freezeAuthority: null,
+  lpLockedPct: 100,
+  lpLockedUsd: 50_000,
+  marketType: "pump_fun_amm",
+  marketCount: 1,
+  totalLiquidityUsd: 60_000,
+  creator: "Dev111",
+  creatorPct: 0.5,
+  creatorTokens: null,
+  insiderNetworks: 0,
+  insiderWallets: 0,
+  insiderPct: 0,
+  insiderEverPct: 0,
+  flaggedHolderPct: 0,
+  totalHolders: 900,
+  rugged: false,
+  riskScore: 1,
+  launchpad: "pump_fun",
+  detectedAt: START,
+  ...overrides,
+});
+
+// Builds the six agents over one universe, with the journals in a temp directory.
+function desk(settings = {}, { report = cleanReport(), reportError = null, buyers = null } = {}) {
   const config = loadConfig({ ...settings, MODE: "paper" });
   const universe = createUniverse();
   const account = freshState(config.paperStartBalanceSol);
   const devBook = createDevBook({ filePath: null });
+  const smartWallets = createSmartWallets({ filePath: null });
   const journals = {
-    screener: createJournal({ filePath: tmpFile("bot1.jsonl") }),
-    filter: createJournal({ filePath: tmpFile("bot2.jsonl") }),
-    executor: createJournal({ filePath: tmpFile("bot3.jsonl") }),
+    scout: createJournal({ filePath: tmpFile("scout.jsonl") }),
+    kills: createJournal({ filePath: tmpFile("kills.jsonl") }),
+    trades: createJournal({ filePath: tmpFile("trades.jsonl") }),
   };
   const logs = [];
-  const log = (message) => logs.push(message);
-  const note = () => {};
+  const logger = createLogger({ journals, log: (line) => logs.push(line), note: () => {} });
 
+  const rugcheckCalls = [];
+  const rugcheck = {
+    ready: () => true,
+    used: () => rugcheckCalls.length,
+    stats: () => ({ calls: rugcheckCalls.length }),
+    async report(mint) {
+      rugcheckCalls.push(mint);
+      if (reportError) throw Object.assign(new Error(reportError), { notFound: true });
+      return report;
+    },
+  };
+  const feed = { buyers: async () => (buyers ? new Set(buyers) : null) };
+
+  const risk = createRisk({ config, account, logger, persist: () => {} });
   const executor = createExecutor({
     config,
     universe,
-    journal: journals.executor,
     account,
+    risk,
+    logger,
     persist: () => {},
     solUsd: () => SOL_USD,
-    isGreen: (mint) => filter.isGreen(mint),
-    // Mirrors src/index.js: a position that collapses bans the coin.
+    isCandidate: (mint) => analyst.passes(mint),
     onRug: (mint) => devBook.recordRug(mint),
-    log,
-    note,
   });
-  const filter = createFilter({
+  const analyst = createAnalyst({
     config,
     universe,
-    journal: journals.filter,
-    devBook,
-    log,
-    note,
-    onGreen: (record) => executor.watch(record),
+    feed,
+    smartWallets,
+    logger,
+    onPassed: (record) => executor.watch(record),
     onDropped: (mint, why) => {
       if (!executor.holds(mint)) executor.unwatch(mint, why);
     },
   });
+  const filter = createFilter({
+    config,
+    universe,
+    devBook,
+    rugcheck,
+    logger,
+    onPassed: (record, meta) => analyst.consider(record, meta),
+    onKilled: (mint, why) => {
+      analyst.withdraw(mint, why);
+      if (!executor.holds(mint)) executor.unwatch(mint, why);
+    },
+  });
 
-  // Exactly what src/index.js wires onScreened to do.
-  const screen = (update, now) => {
-    const record = universe.observe({ source: "dexscreener", ...update }, now);
+  // Exactly what the scout's handoff does in src/index.js, with the window check in front of it —
+  // including the exemption for coins the executor is already acting on.
+  const see = (update, now = START) => {
+    const record = universe.observe({ source: "dexscreener", ageSeconds: 7200, ...update }, now);
+    const held = executor.priorityMints().includes(record.mint);
+    const outside = held ? null : windowReason(record, config.window, universe.ageSeconds(record, now));
+    if (outside) {
+      if (!outside.wait) logger.kill("scout", record, outside, now);
+      return record;
+    }
     filter.consider(record, { now });
     executor.onData(record, now);
     return record;
   };
 
-  return { config, universe, account, devBook, journals, logs, filter, executor, screen };
+  return { config, universe, account, devBook, smartWallets, journals, logs, logger, risk, filter, analyst, executor, see, rugcheckCalls };
 }
 
 const linesOf = (journal) => {
   journal.flush();
-  return fs.readFileSync(journal.filePath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  if (!fs.existsSync(journal.filePath)) return [];
+  return fs.readFileSync(journal.filePath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 };
+const killsOf = (p) => linesOf(p.journals.kills);
+const tradesOf = (p) => linesOf(p.journals.trades);
 
-// Steps a coin up until bot 3 buys it (or gives up). How big a bounce it waits for is its own
-// business — the caller only insists that it does eventually buy.
-function climbUntilEntry(p, mint, from, startAt) {
-  let marketCapUsd = from;
-  let now = startAt;
-  for (let step = 0; step < 8 && !p.executor.status().openPositions; step += 1) {
-    marketCapUsd = Math.round(marketCapUsd * 1.03);
-    now = feed(p, mint, [marketCapUsd], now);
-  }
-  return { now, marketCapUsd };
-}
+// Market caps over time. 11 samples 5s apart is enough for the executor to measure the coin.
+const CLIMB = [400_000, 406_000, 412_000, 408_000, 416_000, 424_000, 420_000, 428_000, 436_000, 432_000, 440_000];
 
-test("a coin walks the whole chain: screened, judged green, watched by bot 3", () => {
-  const p = pipeline();
-  const now = 1_700_000_000_000;
-  const record = p.screen({ mint: "AAA", symbol: "AAA", ageSeconds: 7200, ...pumping(400_000) }, now);
+// The safety check is a call, so its answer lands on a later turn. Wherever a coin has to get PAST
+// the filter, the test has to let that answer arrive — the live desk gets it for free, because it
+// re-judges every coin every RESCORE_INTERVAL_MS for as long as the scout keeps seeing it.
+const settle = () => new Promise(setImmediate);
 
-  assert.equal(record.verdict.state, "green", JSON.stringify(record.verdict));
-  assert.ok(p.filter.isGreen("AAA"));
-  assert.deepEqual(p.executor.priorityMints(), ["AAA"], "bot 3 asks bot 1 to poll what it is watching");
-  assert.equal(p.executor.status().watchingCount, 1);
-  assert.equal(p.executor.status().watching[0].waitingFor, "measure", "it will not buy a coin it has not measured");
-  assert.equal(record.pinned, true, "a coin bot 2 likes is never evicted from the registry");
-});
-
-test("the jeanphil case: a month-old coin is red while it sleeps and green the hour it wakes up", () => {
-  const p = pipeline();
-  const month = 30 * 86_400;
-  let now = 1_700_000_000_000;
-
-  const asleep = {
-    mint: "JEAN", symbol: "JEANPHIL", ageSeconds: month,
-    marketCapUsd: 450_000, liquidityUsd: 60_000,
-    volumeH24Usd: 240_000, volumeH1Usd: 9_000,
-    buysH1: 20, sellsH1: 22, tradesH1: 42, buyersH1: 12, priceChangeH1: -2,
-  };
-
-  // Screened over and over for a month, turned down every time. Never dropped, never blacklisted.
-  for (let i = 0; i < 20; i += 1) {
-    now += 60_000;
-    const record = p.screen(asleep, now);
-    assert.equal(record.verdict.state, "red");
-    assert.equal(record.verdict.category, "low_score");
-  }
-  assert.equal(p.filter.isGreen("JEAN"), false);
-
-  // Then its volume jumps off its own baseline: the same rules now say green.
-  now += 60_000;
-  const awake = p.screen({ ...asleep, volumeH1Usd: 180_000, buysH1: 420, sellsH1: 180, tradesH1: 600, buyersH1: 150, priceChangeH1: 22 }, now);
-  assert.equal(awake.verdict.state, "green");
-  assert.ok(awake.verdict.surgeRatio > 10, `surge ${awake.verdict.surgeRatio}`);
-  assert.equal(awake.verdict.lead, "surge");
-  assert.ok(p.filter.isGreen("JEAN"));
-
-  // And it is handed to bot 3 like any other coin — age played no part in any of this.
-  assert.ok(p.executor.priorityMints().includes("JEAN"));
-  assert.ok(p.logs.some((line) => line.includes("GREEN JEANPHIL")));
-
-  const verdicts = linesOf(p.journals.filter);
-  const last = verdicts[verdicts.length - 1];
-  assert.equal(last.state, "green");
-  assert.equal(last.type, "verdict", "a state change is logged as a change, not as a routine recheck");
-  assert.ok(last.ageSeconds >= month, "the log says how old the coin was");
-  assert.ok(last.surgeRatio > 10, "and what made it green");
-  // The month of red answers is logged once as a change, then only as occasional rechecks, so the
-  // file stays readable while still showing the coin going through.
-  assert.equal(verdicts.filter((row) => row.type === "verdict").length, 2);
-  assert.ok(verdicts.length < 10, `20 screenings produced ${verdicts.length} log lines`);
-});
-
-test("bot 2 keeps judging: a coin that stops pumping loses green and bot 3 drops it", () => {
-  const p = pipeline();
-  let now = 1_700_000_000_000;
-  p.screen({ mint: "BBB", symbol: "BBB", ageSeconds: 7200, ...pumping(400_000) }, now);
-  assert.ok(p.filter.isGreen("BBB"));
-
-  now += 20_000; // past the rescore interval
-  const record = p.screen({ mint: "BBB", volumeH1Usd: 3_000, buysH1: 10, sellsH1: 30, tradesH1: 40, buyersH1: 4, priceChangeH1: -30 }, now);
-  assert.equal(record.verdict.state, "red");
-  assert.equal(p.filter.isGreen("BBB"), false);
-  assert.equal(p.executor.status().watchingCount, 0, "bot 3 does not buy what bot 2 took back");
-});
-
-test("bot 2 rejects an untradable coin before scoring it, and a rugged dev outright", () => {
-  const p = pipeline();
-  const now = 1_700_000_000_000;
-
-  const thin = p.screen({ mint: "THIN", ...pumping(400_000), liquidityUsd: 900 }, now);
-  assert.equal(thin.verdict.state, "red");
-  assert.equal(thin.verdict.category, "liquidity");
-  assert.equal(thin.verdict.score, undefined, "no score is computed for a coin that cannot be traded");
-
-  const nodata = p.screen({ mint: "NEW1", ageSeconds: 5 }, now);
-  assert.equal(nodata.verdict.state, "wait");
-  assert.equal(nodata.verdict.category, "no_data");
-
-  // Two separate protections. The coin that collapsed is banned by its own address...
-  p.devBook.recordLaunch("dev-rug", "RUG1");
-  p.devBook.recordRug("RUG1");
-  const rugged = p.screen({ mint: "RUG1", ...pumping(400_000) }, now);
-  assert.equal(rugged.verdict.state, "red");
-  assert.equal(rugged.verdict.category, "rugged", "a coin that already went to zero is never bought again");
-
-  // ...and anything else from the same wallet is turned down on the creator's record.
-  p.devBook.recordLaunch("dev-rug", "RUG2");
-  const sibling = p.screen({ mint: "RUG2", ...pumping(400_000) }, now);
-  assert.equal(sibling.verdict.state, "red");
-  assert.equal(sibling.verdict.category, "dev_history");
-});
-
-test("a coin that collapses while held is banned, even when its creator was never seen", () => {
-  // Most rugs are coins the bot met through a pool listing, so there is no launch event and no
-  // known creator. Those used to be forgotten entirely and could be bought again minutes later.
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const { now, marketCapUsd } = walkToEntry(p, "RUGME");
-  assert.equal(p.executor.status().openPositions, 1);
-  assert.equal(p.devBook.creatorOf("RUGME"), null, "nobody knows who made it");
-
-  // The pool is drained between two polls: -95% in one tick.
-  feed(p, "RUGME", [Math.round(marketCapUsd * 0.05)], now);
-  assert.equal(p.executor.status().openPositions, 0, "it got out at whatever price was left");
-  assert.equal(p.devBook.isBanned("RUGME"), true, "and the coin is banned from now on");
-
-  // Even if it bounces back and looks healthy, bot 2 will not touch it again.
-  const retry = p.screen({ mint: "RUGME", ...pumping(marketCapUsd) }, now + 60_000);
-  assert.equal(retry.verdict.state, "red");
-  assert.equal(retry.verdict.category, "rugged");
-});
-
-// 11 samples over 50s: enough for bot 3 to measure the coin. Drifting up, so no dip yet.
-const CLIMB = [100_000, 101_500, 103_000, 102_000, 104_000, 106_000, 105_000, 107_000, 109_000, 108_000, 110_000];
-
-function feed(p, mint, series, startAt) {
+async function feed(p, mint, series, startAt, extra = {}) {
   let now = startAt;
   for (const marketCapUsd of series) {
-    p.screen({ mint, symbol: mint, ageSeconds: 7200, ...pumping(marketCapUsd) }, now);
+    p.see({ mint, symbol: mint, ...healthy(marketCapUsd, extra) }, now);
+    await settle();
     now += 5000;
   }
   return now;
 }
 
-// The whole run: climb (so bot 3 can measure the coin), deep dip, then a recovery.
-function walkToEntry(p, mint, startAt = 1_700_000_000_000) {
-  let now = feed(p, mint, CLIMB, startAt);
-  now = feed(p, mint, [96_000, 92_000, 88_000], now);
-  assert.equal(p.executor.status().openPositions, 0, "a falling coin is not bought");
-  return climbUntilEntry(p, mint, 88_000, now);
+// One coin, seen twice far enough apart to be re-judged with the safety answer in hand.
+async function admit(p, update, now = START) {
+  p.see(update, now);
+  await settle();
+  return p.see(update, now + 20_000);
 }
 
-test("bot 3 measures first, then buys the dip-and-bounce and sets stops from that coin's own swing", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const now = feed(p, "CCC", CLIMB, 1_700_000_000_000);
-  assert.equal(p.executor.status().openPositions, 0, "a coin that only goes up is never bought");
-  assert.equal(p.executor.status().watching[0].waitingFor, "dip");
-  assert.ok(p.executor.status().watching[0].volPct > 0, "it has measured how much this coin moves");
+test("the window is the scout's whole job: only what is inside it is handed on", async () => {
+  const p = desk();
 
-  const dipped = feed(p, "CCC", [96_000, 92_000, 88_000], now);
-  assert.equal(p.executor.status().openPositions, 0);
-  assert.equal(p.executor.status().watching[0].waitingFor, "bounce", "the dip registered; now it wants buyers back");
+  // Too new to have a history, and past the point where the launch crowd has gone.
+  p.see({ mint: "YOUNG", symbol: "YOUNG", ageSeconds: 600, ...healthy(400_000) });
+  p.see({ mint: "OLD", symbol: "OLD", ageSeconds: 10 * 86_400, ...healthy(400_000) });
+  // Inside the age window but outside the size band.
+  p.see({ mint: "TINY", symbol: "TINY", ...healthy(80_000) });
+  p.see({ mint: "HUGE", symbol: "HUGE", ...healthy(60_000_000) });
 
-  climbUntilEntry(p, "CCC", 88_000, dipped);
-  const status = p.executor.status();
-  assert.equal(status.openPositions, 1, "the bounce is the trigger");
-  const position = status.positions[0];
-  assert.ok(position.stopPct > 0 && position.stopPct <= 0.3);
-  assert.ok(position.trailPct > 0 && position.trailPct < position.stopPct, "the trail is tighter than the hard stop");
-  assert.equal(p.account.balanceSol, p.config.paperStartBalanceSol - p.config.buyAmountSol);
-  assert.equal(p.account.daily.entries, 1);
+  assert.equal(p.filter.status().judged, 0, "nothing reached the filter");
+  const kills = killsOf(p);
+  assert.deepEqual(kills.map((k) => k.category), ["too_young", "too_old", "mcap_low", "mcap_high"]);
+  assert.ok(kills.every((k) => k.stage === "scout"));
+  assert.match(kills[0].detail, /10m old, the desk starts at 30m/);
 
-  const entries = linesOf(p.journals.executor).filter((row) => row.type === "entry");
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].trigger, "dip-and-bounce");
-  assert.ok(entries[0].levels.volPct > 0, "the log records the levels it chose and why");
-  assert.ok(entries[0].dipFromPeakPct > 0 && entries[0].reboundPct > 0);
+  // And one inside the window goes all the way through.
+  await admit(p, { mint: "GOOD", symbol: "GOOD", ...healthy(400_000) });
+  assert.ok(p.filter.status().judged >= 1);
+  assert.equal(p.universe.get("GOOD").filter.state, "pass");
 });
 
-test("bot 3 exits on its own trailing stop, and the trade lands in the account", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const { now, marketCapUsd } = walkToEntry(p, "DDD");
-  assert.equal(p.executor.status().openPositions, 1, "needs a position before it can exit one");
-  const position = p.executor.status().positions[0];
+test("a coin walks the whole chain: scouted, filtered, scored, watched by the executor", async () => {
+  const p = desk();
+  const record = await admit(p, { mint: "AAA", symbol: "AAA", ...healthy(400_000) });
 
-  // Up a little (so the peak moves), then down through the trail measured from that peak.
-  const peak = Math.round(marketCapUsd * 1.05);
-  let clock = feed(p, "DDD", [peak], now);
-  feed(p, "DDD", [Math.round(peak * (1 - position.trailPct - 0.02))], clock);
-
-  const status = p.executor.status();
-  assert.equal(status.openPositions, 0, "it got out by itself");
-  assert.equal(status.closedTrades.length, 1);
-  const trade = status.closedTrades[0];
-  assert.ok(["trail", "trail-locked", "stop-loss"].includes(trade.reason), `exit reason ${trade.reason}`);
-  assert.ok(Math.abs(p.account.balanceSol - (p.config.paperStartBalanceSol + trade.pnlSol)) < 1e-9);
-  assert.equal(status.wins + status.losses, 1);
-
-  const exits = linesOf(p.journals.executor).filter((row) => row.type === "exit");
-  assert.equal(exits.length, 1);
-  assert.ok(exits[0].heldSeconds >= 0);
-  assert.ok(exits[0].levels.trailPct > 0, "the exit log says which levels it was using");
+  assert.equal(record.filter.state, "pass", JSON.stringify(record.filter));
+  assert.ok(record.analysis.score >= 70, `scored ${record.analysis.score}`);
+  assert.equal(p.analyst.passes("AAA"), true);
+  assert.equal(p.executor.status().watchingCount, 1);
+  assert.equal(p.executor.status().watching[0].waitingFor, "measure", "it will not buy a coin it has not measured");
+  assert.equal(record.pinned, true, "a coin the desk wants is never evicted from the registry");
+  assert.ok(p.logs.some((line) => line.includes("[analyst] AAA scores")));
 });
 
-test("bot 3 will not trade a dip that is only two sources disagreeing", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  let now = 1_700_000_000_000;
-  // Measured and climbing on GeckoTerminal's numbers, which report FDV for this coin: ~$850k.
-  for (const marketCapUsd of CLIMB) {
-    p.screen({ mint: "FDV1", symbol: "FDV1", ageSeconds: 7200, ...pumping(marketCapUsd * 8), source: "gecko:top" }, now);
-    now += 5000;
-  }
-  assert.equal(p.executor.status().watching[0].waitingFor, "dip");
-
-  // DexScreener then reports the same coin at $120k — circulating rather than fully diluted. That
-  // is a different definition, not an 86% crash, and the old peak would make the next tick up look
-  // like a textbook bounce.
-  p.screen({ mint: "FDV1", ...pumping(120_000), source: "dexscreener" }, now);
-  now += 5000;
-  p.screen({ mint: "FDV1", ...pumping(126_000), source: "dexscreener" }, now);
-
-  const status = p.executor.status();
-  assert.equal(status.openPositions, 0, "it did not buy the imaginary bounce");
-  assert.equal(status.watching[0].waitingFor, "measure", "it starts measuring again on the new yardstick");
-  assert.equal(status.watching[0].peakMarketCapUsd, 120_000, "and forgets the peak it measured differently");
-});
-
-// Drives a coin that is already held to a given market cap, repeatedly, and returns the trade if
-// bot 3 closed it.
-function pushTo(p, mint, series, startAt) {
-  let now = startAt;
-  for (const marketCapUsd of series) {
-    p.screen({ mint, symbol: mint, ageSeconds: 7200, ...pumping(marketCapUsd) }, now);
-    now += 5000;
-  }
-  return { now, trade: p.executor.status().closedTrades[0] ?? null };
-}
-
-test("bot 3 lets a winner run instead of taking a fixed profit", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const { now, marketCapUsd } = walkToEntry(p, "RUNNER");
-  assert.equal(p.executor.status().openPositions, 1);
-  const { stopPct, trailPct } = p.executor.status().positions[0];
-
-  // Up and up. An old-style take-profit target would have sold somewhere in here.
-  let clock = now;
-  let price = marketCapUsd;
-  for (let step = 0; step < 12; step += 1) {
-    price = Math.round(price * 1.08);
-    clock = pushTo(p, "RUNNER", [price], clock).now;
-  }
-  const status = p.executor.status();
-  assert.equal(status.openPositions, 1, `sold early at +${((price / marketCapUsd - 1) * 100).toFixed(0)}%`);
-  assert.ok(price / marketCapUsd > 2, "the coin more than doubled and bot 3 is still holding");
-  assert.ok(stopPct > 0 && trailPct > 0);
-
-  // Only when it finally gives back more than the trail does it sell — and it keeps the gain.
-  const peak = price;
-  pushTo(p, "RUNNER", [Math.round(peak * 0.7)], clock);
-  const closed = p.executor.status().closedTrades[0];
-  assert.ok(closed, "the trail ended the trade");
-  assert.equal(closed.reason, "trail-locked");
-  assert.ok(closed.pnlSol > 0, `a doubled coin should close green, got ${closed.pnlSol}`);
-});
-
-test("bot 3 will not let a trade that was well up turn into a loss", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const { now, marketCapUsd } = walkToEntry(p, "GIVEBACK");
-  const entry = linesOf(p.journals.executor).find((row) => row.type === "entry");
-  assert.ok(entry.levels.lockPct > 0 && entry.levels.breakEvenPct >= 0, "the trade recorded its levels");
-
-  // Up past the lock threshold, so the flat floor ratchets to break-even...
-  const high = Math.round(marketCapUsd * 1.35);
-  let clock = pushTo(p, "GIVEBACK", [high], now).now;
-  assert.equal(p.executor.status().openPositions, 1);
-
-  // ...then all the way back down. It must not ride it to the original stop.
-  pushTo(p, "GIVEBACK", [Math.round(marketCapUsd * 1.0)], clock);
-  const closed = p.executor.status().closedTrades[0];
-  assert.ok(closed, "it closed rather than giving everything back");
-  assert.ok(["break-even", "trail-locked"].includes(closed.reason), `closed as ${closed.reason}`);
-  assert.ok(closed.exitMarketCapUsd >= marketCapUsd * 0.95, "it got out near where it went in");
-});
-
-test("a locked trade that gaps through the floor is reported as the loss it was", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const { now, marketCapUsd } = walkToEntry(p, "GAPPY");
-  // Well up, so the break-even floor arms...
-  let clock = pushTo(p, "GAPPY", [Math.round(marketCapUsd * 1.4)], now).now;
-  assert.equal(p.executor.status().openPositions, 1);
-  // ...then one tick straight through it to below entry. Polling is every couple of seconds, so
-  // this happens; the label must not claim break-even on a losing exit.
-  pushTo(p, "GAPPY", [Math.round(marketCapUsd * 0.8)], clock);
-  const closed = p.executor.status().closedTrades[0];
-  assert.ok(closed);
-  assert.ok(closed.pnlSol < 0, "it was a loss");
-  assert.notEqual(closed.reason, "break-even", "a losing exit must not be filed as break-even");
-});
-
-test("bot 3 still cuts a trade that never worked", () => {
-  const p = pipeline({ ENTRY_MODE: "dip" });
-  const { now, marketCapUsd } = walkToEntry(p, "DUD");
-  const { stopPct } = p.executor.status().positions[0];
-  // Straight down from entry, past the flat stop.
-  pushTo(p, "DUD", [Math.round(marketCapUsd * (1 - stopPct - 0.03))], now);
-  const closed = p.executor.status().closedTrades[0];
-  assert.ok(closed);
-  assert.ok(["stop-loss", "trail"].includes(closed.reason), `closed as ${closed.reason}`);
-  assert.ok(closed.pnlSol < 0);
-});
-
-test("bot 3 buys a coin that climbs without ever dipping", () => {
-  // The case that made this mode exist: a steady climber never pulls back 1.2x its own move, so
-  // dip-only would watch the whole run go past.
-  const p = pipeline({ ENTRY_MODE: "both" });
-  feed(p, "CLIMBER", CLIMB, 1_700_000_000_000);
-  const status = p.executor.status();
-  assert.equal(status.openPositions, 1, "a coin that only goes up is still bought");
-
-  const entry = linesOf(p.journals.executor).find((row) => row.type === "entry");
-  assert.equal(entry.trigger, "breakout", "and the journal says which trigger fired");
-  assert.equal(entry.dipFromPeakPct, 0);
-  assert.ok(entry.levels.stopPct > 0, "it still sized its stop from the coin's own movement");
-});
-
-test("dip-only mode still refuses the climber, breakout-only still refuses the retrace", () => {
-  const dipOnly = pipeline({ ENTRY_MODE: "dip" });
-  feed(dipOnly, "CLIMBER", CLIMB, 1_700_000_000_000);
-  assert.equal(dipOnly.executor.status().openPositions, 0);
-  assert.equal(dipOnly.executor.status().watching[0].waitingFor, "dip");
-
-  // Breakout-only: a coin falling back from its high is not bought, however far it bounces.
-  const breakoutOnly = pipeline({ ENTRY_MODE: "breakout" });
-  const now = feed(breakoutOnly, "FADER", CLIMB, 1_700_000_000_000);
-  assert.equal(breakoutOnly.executor.status().openPositions, 1, "it bought the first new high");
-  // Now a second coin that only ever falls: no new high, no entry.
-  feed(breakoutOnly, "FALLER", [100_000, 99_000, 97_000, 96_000, 94_000, 93_000, 92_000, 91_000, 90_000, 89_000, 88_000], now);
-  const waiting = breakoutOnly.executor.status().watching.find((c) => c.mint === "FALLER");
-  assert.ok(waiting, "still watching it");
-  assert.ok(["high", "measure"].includes(waiting.waitingFor), `waiting for ${waiting.waitingFor}`);
-});
-
-test("a breakout entry still refuses a vertical candle and a seller-dominated coin", () => {
-  // Same fill guards as the dip entry: bot 2 judged the coin, these are about the price paid.
-  // Drifting down from the first sample, so no new high is set and nothing is bought while it
-  // measures...
-  const spiky = pipeline({ ENTRY_MODE: "breakout" });
-  let now = feed(spiky, "SPIKE", [120_000, 118_000, 116_000, 115_000, 113_000, 112_000, 110_000, 109_000, 108_000, 107_000, 106_000], 1_700_000_000_000);
-  assert.equal(spiky.executor.status().openPositions, 0);
-
-  // ...then one vertical candle straight past the old high. That is a terrible fill, so it waits
-  // for the next measurement instead of buying the spike.
-  feed(spiky, "SPIKE", [260_000], now);
-  assert.equal(spiky.executor.status().openPositions, 0, "it did not buy the vertical candle");
-  assert.equal(spiky.executor.status().watching[0].waitingFor, "spike");
-
-  const sellers = pipeline({ ENTRY_MODE: "breakout" });
-  let clock = 1_700_000_000_000;
-  for (const marketCapUsd of CLIMB) {
-    // Green on volume, but sellers dominate the hour: the fill guard blocks it.
-    sellers.screen({
-      mint: "SELLY", symbol: "SELLY", ageSeconds: 7200,
-      ...pumping(marketCapUsd), buysH1: 150, sellsH1: 450, tradesH1: 600,
-    }, clock);
-    clock += 5000;
-  }
-  assert.equal(sellers.executor.status().openPositions, 0, "not bought while sellers dominate");
-  assert.equal(sellers.executor.status().watching[0].waitingFor, "buyers");
-});
-
-test("one trade can never lose more than the hard ceiling allows", () => {
-  // A jumpy coin's own volatility would earn it a 30% stop; the ceiling overrides that.
-  const p = pipeline({ ENTRY_MODE: "dip", MAX_LOSS_PCT: "0.2" });
-  walkToEntry(p, "WILD");
-  const position = p.executor.status().positions[0];
-  assert.ok(position, "needs a position");
-  assert.ok(position.stopPct <= 0.2 + 1e-9, `stop is ${position.stopPct}, above the 20% ceiling`);
-
-  // The ceiling still cannot squeeze inside the round-trip cost, or the stop fires on the spread.
-  const tight = pipeline({ ENTRY_MODE: "dip", MAX_LOSS_PCT: "0.02" });
-  walkToEntry(tight, "WILD2");
-  const squeezed = tight.executor.status().positions[0];
-  assert.ok(squeezed.stopPct >= 0.06, `stop ${squeezed.stopPct} is inside the 6% round trip`);
-});
-
-test("the emergency exit closes one coin, or all of them", () => {
-  const p = pipeline({ ENTRY_MODE: "breakout", MAX_OPEN_POSITIONS: "3" });
-  let now = 1_700_000_000_000;
-  for (const mint of ["AAA1", "BBB1", "CCC1"]) {
-    now = feed(p, mint, CLIMB, now);
-  }
-  assert.equal(p.executor.status().openPositions, 3);
-
-  // One coin by name.
-  assert.equal(p.executor.closeNow("BBB1", "manual"), 1);
-  const after = p.executor.status();
-  assert.equal(after.openPositions, 2);
-  assert.ok(!after.positions.some((position) => position.mint === "BBB1"));
-  assert.equal(after.closedTrades[0].reason, "manual", "the journal says it was closed by hand");
-
-  // Then everything that is left.
-  assert.equal(p.executor.closeNow(null, "manual"), 2);
-  assert.equal(p.executor.status().openPositions, 0);
-  assert.equal(p.executor.closeNow(null, "manual"), 0, "nothing left to close");
-  assert.equal(p.executor.closeNow("NOPE", "manual"), 0, "a coin that is not held");
-
-  // The money came back: three positions' cost, minus what the round trip cost.
-  const spent = 3 * p.config.buyAmountSol;
-  assert.ok(p.account.balanceSol < p.config.paperStartBalanceSol);
-  assert.ok(p.account.balanceSol > p.config.paperStartBalanceSol - spent);
-});
-
-test("bot 3 holds off when a money limit says no, and keeps watching the coin", () => {
-  const p = pipeline({ MAX_ENTRIES_PER_DAY: "1", PAPER_START_BALANCE_SOL: "1", BUY_AMOUNT_SOL: "0.01" });
-  p.account.daily.entries = 1; // the day's one entry is already spent
-  walkToEntry(p, "EEE");
-  const status = p.executor.status();
-  assert.equal(status.openPositions, 0);
-  assert.match(status.blockedReason, /entry per hari/);
-  assert.equal(status.watchingCount, 1, "the coin is still watched in case the limit frees up");
-  assert.equal(p.account.balanceSol, 1, "nothing was spent");
-});
-
-test("bot 1 screens launches and migrations and logs every coin it sees", () => {
-  const p = pipeline();
-  const filePath = tmpFile("bot1-feed.jsonl");
-  const journal = createJournal({ filePath });
-  const stubFeed = {
-    canSweep: () => true,
-    sweep: async () => [],
-    pools: async () => [],
-    snapshots: async () => new Map(),
-    solUsd: () => SOL_USD,
-    geckoCallsUsed: () => 0,
-  };
-  const screener = createScreener({
-    config: p.config,
-    universe: p.universe,
-    feed: stubFeed,
-    journal,
-    devBook: p.devBook,
-    log: () => {},
-    note: () => {},
-    onScreened: (record, meta) => {
-      p.filter.consider(record, meta);
-      p.executor.onData(record, meta.now);
-    },
-  });
-
-  screener.onLaunch({ mint: "LAU1", name: "Launchy", symbol: "LAU", traderPublicKey: "dev-x" });
-  screener.onMigration({ mint: "MIG1", symbol: "MIG", pool: "pool-1" });
-  screener.onLaunch({ mint: "LAU1", symbol: "LAU", traderPublicKey: "dev-x" }); // seen again
-
-  const status = screener.status();
-  assert.equal(status.coins, 2, "two distinct coins");
-  assert.equal(status.observations, 3);
-  assert.equal(status.launches, 2);
-  assert.equal(status.migrations, 1);
-  assert.ok(status.perMinute >= 3);
-  assert.equal(p.devBook.assess("LAU1", { maxDevLaunches: 5 }).verdict, "clean", "the creator was remembered");
-
-  const lines = linesOf(journal, filePath);
-  assert.equal(lines.filter((row) => row.type === "new").length, 2, "every new coin is logged");
-  assert.equal(lines[0].mint, "LAU1");
-  assert.equal(lines[0].source, "launch");
-  journal.stop();
-});
-
-test("bot 1 keeps re-checking coins that went quiet — that is how a revival is caught", async () => {
-  const p = pipeline();
-  const now = 1_700_000_000_000;
-  // A coin met two hours ago that has done nothing since. The old rotation dropped anything idle
-  // for 30 minutes, which meant the one coin most likely to wake up was the one we stopped looking
-  // at.
-  p.universe.observe({ mint: "SLEEPY", symbol: "SLEEPY", marketCapUsd: 300_000, source: "gecko:top" }, now - 2 * 3_600_000);
-  for (let i = 0; i < 5; i += 1) {
-    p.universe.observe({ mint: `other-${i}`, marketCapUsd: 100_000, source: "gecko:top" }, now);
-  }
-
-  const asked = [];
-  const journal = createJournal({ filePath: tmpFile("bot1-recheck.jsonl") });
-  const screener = createScreener({
-    config: { ...p.config, refreshCallsPerTick: 1, refreshBatchSize: 30 },
-    universe: p.universe,
-    feed: {
-      canSweep: () => false, // GeckoTerminal paused: the re-check must not depend on it
-      sweep: async () => [],
-      pools: async () => [],
-      snapshots: async (mints) => {
-        asked.push(...mints);
-        return new Map();
-      },
-      solUsd: () => SOL_USD,
-      geckoCallsUsed: () => 0,
-    },
-    journal,
-    devBook: p.devBook,
-    log: () => {},
-    note: () => {},
-    onScreened: () => {},
-  });
-
-  screener.start();
-  await new Promise((resolve) => setTimeout(resolve, 2300));
-  screener.stop();
-  journal.stop();
-
-  assert.ok(asked.includes("SLEEPY"), "a coin idle for two hours is still in the rotation");
-  assert.equal(new Set(asked).size, 6, "and so is everything else we know about");
-  // How long a full pass takes, which with six coins and 900 refreshes a minute rounds to nothing.
-  const { recheckSeconds } = screener.status();
-  assert.ok(Number.isFinite(recheckSeconds) && recheckSeconds >= 0, `recheckSeconds was ${recheckSeconds}`);
-  assert.ok(recheckSeconds < 5, "a tiny registry is re-checked almost immediately");
-});
-
-test("bot 1 screens a sweep page without judging any of it", async () => {
-  const p = pipeline();
-  const filePath = tmpFile("bot1-sweep.jsonl");
-  const journal = createJournal({ filePath });
-  const SOL = "So11111111111111111111111111111111111111112";
-  const rows = [
-    // A month-old coin and a brand-new one come back from the same page and are treated the same.
-    { pool: "p1", mint: "OLD1", quoteMint: SOL, symbol: "OLD", ageSeconds: 45 * 86_400, marketCapUsd: 800_000, liquidityUsd: 90_000, volumeH1Usd: 150_000, volumeH24Usd: 400_000, buysH1: 300, tradesH1: 400, buyersH1: 120, priceChangeH1: 12 },
-    { pool: "p2", mint: "NEW2", quoteMint: SOL, symbol: "NEW", ageSeconds: 300, marketCapUsd: 60_000, liquidityUsd: 12_000, volumeH1Usd: 30_000, volumeH24Usd: 30_000, buysH1: 150, tradesH1: 200, buyersH1: 70, priceChangeH1: 40 },
-    { pool: "p3", mint: SOL, quoteMint: SOL, symbol: "SOL", ageSeconds: 1000 }, // not a memecoin
+test("the filter kills what the spec says it must, and says which rule did it", async () => {
+  const cases = [
+    ["mint_authority", { mintAuthority: "Dev111" }],
+    ["freeze_authority", { freezeAuthority: "Dev111" }],
+    ["lp_unlocked", { lpLockedPct: 42 }],
+    ["dev_holding", { creatorPct: 7.5 }],
+    ["bundled", { insiderPct: 18, insiderWallets: 9, insiderNetworks: 2 }],
+    ["rugged", { rugged: true }],
   ];
-  const screener = createScreener({
-    config: { ...p.config, discoveryTickMs: 10_000, refreshIntervalMs: 10_000 },
-    universe: p.universe,
-    feed: {
-      canSweep: () => true,
-      sweep: async () => rows,
-      pools: async () => [],
-      snapshots: async () => new Map(),
-      solUsd: () => SOL_USD,
-      geckoCallsUsed: () => 1,
-    },
-    journal,
-    devBook: p.devBook,
-    log: () => {},
-    note: () => {},
-    onScreened: (record, meta) => p.filter.consider(record, meta),
+  for (const [category, overrides] of cases) {
+    const p = desk({}, { report: cleanReport(overrides) });
+    const record = await admit(p, { mint: "BAD", symbol: "BAD", ...healthy(400_000) });
+    assert.equal(record.filter.state, "kill", `${category} should kill`);
+    assert.equal(record.filter.category, category);
+    assert.equal(p.analyst.status().scored, 0, "a killed coin never reaches the analyst");
+    assert.equal(killsOf(p)[0].stage, "filter");
+  }
+
+  // The local ones, which cost no call at all — so they kill on the very first sighting.
+  const thin = desk().see({ mint: "THIN", symbol: "THIN", ...healthy(400_000, { liquidityUsd: 9_000 }) });
+  assert.equal(thin.filter.category, "liquidity");
+  const late = desk().see({ mint: "LATE", symbol: "LATE", ...healthy(400_000, { priceChangeH1: 140 }) });
+  assert.equal(late.filter.category, "pumped_already");
+});
+
+test("a safety check that could not be made is a wait, never a pass", async () => {
+  // The rule that matters most: unknown is not clean. A coin RugCheck has not indexed waits in
+  // place and is looked at again, rather than going through unchecked.
+  const p = desk({}, { reportError: "not indexed yet" });
+  const record = await admit(p, { mint: "UNK", symbol: "UNK", ...healthy(400_000) });
+  assert.equal(record.filter.state, "wait");
+  assert.equal(record.filter.category, "safety_pending");
+  assert.equal(p.analyst.status().scored, 0);
+  assert.equal(p.executor.status().watchingCount, 0);
+});
+
+test("the analyst only passes 70+, and says what the score was made of", async () => {
+  // A coin that is safe but dull: no momentum, few buyers, sellers taking over.
+  const p = desk();
+  const dull = await admit(p, {
+    mint: "DULL",
+    symbol: "DULL",
+    ...healthy(400_000, { priceChangeH1: 1, buyersH1: 12, sellersH1: 11, buysH1: 60, sellsH1: 58, tradesH1: 118 }),
   });
+  assert.equal(dull.filter.state, "pass", "nothing unsafe about it");
+  assert.ok(dull.analysis.score < 70, `dull coin scored ${dull.analysis.score}`);
+  assert.equal(p.analyst.passes("DULL"), false);
 
-  screener.start();
-  await new Promise((resolve) => setTimeout(resolve, 1300));
-  screener.stop();
+  const kill = killsOf(p).find((k) => k.stage === "analyst");
+  assert.ok(kill, "the analyst's refusal is logged like any other kill");
+  assert.equal(kill.category, "below_score");
+  assert.match(kill.detail, /scored \d+, needs 70/);
+  assert.ok(kill.parts.momentum !== undefined, "with the parts, so the weights can be argued with later");
+});
 
-  const status = screener.status();
-  assert.equal(status.coins, 2, "the SOL pool is not a memecoin and is skipped");
-  assert.ok(p.universe.get("OLD1"), "a 45-day-old coin is screened like any other");
-  assert.ok(p.universe.get("NEW2"));
-  assert.equal(p.universe.get(SOL), null);
-  assert.equal(status.sources["gecko:new"] > 0, true);
-  journal.stop();
+test("risk sizes the trade at 8% of the balance and shrinks with the account", () => {
+  const p = desk({ PAPER_START_BALANCE_SOL: "2" });
+  assert.equal(p.risk.sizeSol(), 0.16);
+  p.account.balanceSol = 0.5;
+  assert.equal(p.risk.sizeSol(), 0.04, "8% of what is left, not 8% of what it started with");
+
+  const tight = desk({ POSITION_PCT: "0.25", PAPER_START_BALANCE_SOL: "1" });
+  assert.equal(tight.risk.sizeSol(), 0.25);
+});
+
+test("risk: the stop is fixed before entry, and nothing trails until +12%", () => {
+  const p = desk({ PAPER_FEE_BPS: "0", PAPER_SLIPPAGE_BPS: "0" });
+  const levels = p.risk.levelsFor(0.02);
+  assert.equal(levels.stopPct, 0.06);
+  assert.equal(levels.trailAfterPct, 0.12);
+
+  const position = { openedAt: START, lastHighAt: START, entryMarketCapUsd: 100_000, peakMarketCapUsd: 100_000, levels, armed: false };
+  const at = (mcap, peak = position.peakMarketCapUsd) => {
+    position.peakMarketCapUsd = Math.max(peak, mcap);
+    return p.risk.exitReason(position, mcap, START + 1000);
+  };
+
+  assert.equal(at(96_000), null, "-4% is inside the stop");
+  assert.equal(at(94_000), "stop-loss", "-6% is the stop");
+
+  // Up 13%: the trail arms. From there the floor never goes below break-even.
+  const armedPos = { ...position, peakMarketCapUsd: 113_000, armed: true };
+  assert.equal(p.risk.exitReason(armedPos, 112_000, START + 1000), null, "still near the peak");
+  assert.equal(p.risk.exitReason(armedPos, 103_000, START + 1000), "trail", "8% off the peak, and still in profit");
+  // A trade that was up 13% and came all the way back is closed at break-even, not at a loss.
+  assert.equal(p.risk.exitReason(armedPos, 99_000, START + 1000), "stop-loss");
+});
+
+test("risk refuses entries on money limits, and the refusal is logged once per reason", () => {
+  const p = desk({ MAX_OPEN_POSITIONS: "1" });
+  p.account.positions.HELD = { mint: "HELD" };
+
+  const record = { mint: "WANT", symbol: "WANT" };
+  assert.match(p.risk.blockReason(record), /1 posisi terbuka/);
+  p.risk.blockReason(record);
+  p.risk.blockReason(record);
+  const kills = killsOf(p).filter((k) => k.stage === "risk");
+  assert.equal(kills.length, 1, "the same limit on every tick is one line, not a thousand");
+  assert.equal(kills[0].category, "money_limit");
+
+  delete p.account.positions.HELD;
+  assert.equal(p.risk.blockReason(record), "", "and it lifts when the position closes");
+});
+
+test("the executor measures first, then buys, and the stop it entered with is the spec's", async () => {
+  const p = desk({ ENTRY_MODE: "breakout" });
+  let now = await feed(p, "CCC", CLIMB.slice(0, 4), START);
+  assert.equal(p.executor.status().openPositions, 0, "not until it has been measured");
+
+  now = await feed(p, "CCC", CLIMB.slice(4), now);
+  const status = p.executor.status();
+  assert.equal(status.openPositions, 1, JSON.stringify(status.watching[0]));
+  const position = status.positions[0];
+  assert.equal(position.stopPct, 0.06);
+  assert.ok(Math.abs(position.costSol - 0.08) < 1e-9, `sized at ${position.costSol} SOL`);
+  assert.ok(p.logs.some((line) => line.includes("[executor] BUY CCC")));
+
+  // And it exits on the flat stop.
+  await feed(p, "CCC", [Math.round(status.positions[0].entryMarketCapUsd * 0.9)], now);
+  assert.equal(p.executor.status().openPositions, 0);
+  const exit = tradesOf(p).filter((row) => row.type === "exit").pop();
+  assert.equal(exit.reason, "stop-loss");
+});
+
+test("a coin that stops clearing the filter is taken off the executor's watchlist", async () => {
+  const p = desk();
+  await admit(p, { mint: "DDD", symbol: "DDD", ...healthy(400_000) });
+  assert.equal(p.executor.status().watchingCount, 1);
+
+  // The dev starts selling into it: the same coin, now failing a hard check.
+  p.universe.get("DDD").rugcheck = { status: "ok", at: START + 20_000, ...cleanReport({ creatorPct: 40 }) };
+  p.see({ mint: "DDD", ...healthy(400_000) }, START + 40_000);
+  assert.equal(p.universe.get("DDD").filter.category, "dev_holding");
+  assert.equal(p.analyst.passes("DDD"), false);
+  assert.equal(p.executor.status().watchingCount, 0, "and the executor stops waiting for it");
+});
+
+test("the smart-wallet registry learns from what happened next, and knows nothing on night one", () => {
+  const p = desk({}, { buyers: ["walletA", "walletB"] });
+  assert.equal(p.smartWallets.crowdScore(["walletA"]), null, "no record yet, so no opinion");
+  assert.equal(p.smartWallets.score("walletA"), 0.5);
+
+  p.smartWallets.sample("EEE", ["walletA", "walletB"], 400_000, START);
+  assert.equal(p.smartWallets.settle("EEE", 500_000, START + 60_000), null, "too early to judge");
+
+  const settled = p.smartWallets.settle("EEE", 700_000, START + 31 * 60_000);
+  assert.deepEqual({ won: settled.won, wallets: settled.wallets }, { won: true, wallets: 2 });
+  assert.ok(p.smartWallets.score("walletA") > 0.5, "the wallets that were early get credit");
+
+  // One right answer is not a record: the score is pulled back towards neutral until there are a
+  // few of them.
+  assert.ok(p.smartWallets.score("walletA") < 0.65, "but not much credit, on one sample");
+});
+
+test("every kill is written down with the stage that made it", async () => {
+  const p = desk();
+  p.see({ mint: "YOUNG", symbol: "YOUNG", ageSeconds: 300, ...healthy(400_000) });
+  p.see({ mint: "THIN", symbol: "THIN", ...healthy(400_000, { liquidityUsd: 1_000 }) });
+  await admit(p, { mint: "DULL", symbol: "DULL", ...healthy(400_000, { priceChangeH1: 0, buyersH1: 60, sellersH1: 55 }) });
+
+  // The file carries the passes too, so the funnel adds up; the kills are what must explain
+  // themselves.
+  const kills = killsOf(p).filter((row) => row.type === "kill");
+  const stages = kills.map((k) => k.stage);
+  assert.ok(stages.includes("scout") && stages.includes("filter") && stages.includes("analyst"));
+  for (const kill of kills) {
+    assert.ok(kill.category && kill.detail, "a kill with no reason is useless in the morning");
+    assert.ok(kill.mint, "and it has to say which coin");
+  }
+  assert.equal(p.logger.status().kills, kills.length);
+  assert.ok(p.logger.status().byStage.filter >= 1);
+});
+
+test("a coin that collapses while held is banned, whoever made it", async () => {
+  const p = desk({ ENTRY_MODE: "breakout" });
+  const now = await feed(p, "RUGME", CLIMB, START);
+  assert.equal(p.executor.status().openPositions, 1);
+  const entry = p.executor.status().positions[0].entryMarketCapUsd;
+
+  // The pool is drained between two polls.
+  await feed(p, "RUGME", [Math.round(entry * 0.05)], now);
+  assert.equal(p.executor.status().openPositions, 0, "it got out at whatever price was left");
+  assert.equal(p.devBook.isBanned("RUGME"), true);
+
+  // Even looking healthy again, the filter will not have it.
+  const retry = p.see({ mint: "RUGME", ...healthy(400_000) }, now + 60_000);
+  assert.equal(retry.filter.state, "kill");
+  assert.equal(retry.filter.category, "rugged");
 });

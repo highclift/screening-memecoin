@@ -25,7 +25,7 @@ function keep(target, source, keys) {
 
 const NUMERIC_FIELDS = [
   "volumeH1Usd", "volumeH24Usd",
-  "buysH1", "sellsH1", "tradesH1", "buyersH1",
+  "buysH1", "sellsH1", "tradesH1", "buyersH1", "sellersH1",
   "priceChangeM5", "priceChangeH1", "priceChangeH24",
   "priceSol",
 ];

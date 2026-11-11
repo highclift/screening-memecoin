@@ -1,20 +1,22 @@
-// BOT 1 — SCREENING
+// AGENT 1 — SCOUT
 //
-// Its only job is to see coins and write down what it saw. Every coin, at any age: one that
-// migrated to an AMM a minute ago and one that launched a month ago and has been quiet since. It
-// has no opinion about any of them — that is bot 2's job — so nothing here rejects a coin.
+// Finds coins and decides one thing only: is this one in the window the desk trades at all? Age
+// between `minAgeSeconds` and `maxAgeSeconds`, market cap inside the band. Everything else — can it
+// pump, is it safe, is it worth buying — belongs to the agents after it.
+//
+// The window is the whole point of this stage. Under 30 minutes a coin has no history to measure
+// and its first candle is bots trading with bots; past 72 hours the launch crowd has gone and what
+// is left is a chart, not an event. So the scout keeps watching everything (a 20-minute-old coin
+// becomes eligible at 30, a $200k coin becomes eligible when it grows) but only HANDS ON what is
+// inside the window.
 //
 // Where the coins come from:
 //   PumpPortal websocket  — brand-new launches and migrations, pushed the moment they happen
 //   GeckoTerminal sweep   — pages of new / trending / top-volume pools, walked round-robin
-//   DexScreener refresh   — fresh numbers for the coins bot 2 and bot 3 are still interested in
+//   DexScreener refresh   — the real on-chain numbers for every coin already known
 //
-// This is how a month-old coin gets screened again: when it wakes up, its volume carries it back
-// onto the trending and top-volume pages, so the sweep picks it up with current numbers and hands
-// it to bot 2 — which is free to turn it green today after calling it red for weeks.
-//
-// Every coin it screens goes to data/bot1-screened.jsonl. A coin is logged the first time it is
-// seen and then at most once a minute, so a few hundred coins a minute stays readable.
+// Every sighting goes to data/scout.jsonl; every coin turned away at the window goes to the kill
+// log with the reason. A coin is written the first time it is seen and then at most once a minute.
 
 import { DISCOVERY_JOBS, DISCOVERY_PAGE_COUNT, isMemecoinPool } from "../discovery.js";
 import { createMeter } from "../meter.js";
@@ -22,22 +24,47 @@ import { createMeter } from "../meter.js";
 const LOG_REPEAT_MS = 60_000;
 const RECENT_KEPT = 40;
 
-export function createScreener({ config, universe, feed, journal, devBook, log, note, onScreened }) {
+const usd = (value) => `$${Math.round(value).toLocaleString("en-US")}`;
+const hours = (seconds) => (seconds < 3600 ? `${Math.round(seconds / 60)}m` : `${(seconds / 3600).toFixed(1)}h`);
+
+// Is this coin inside the window the desk trades? Returns null when it is, or the reason it is not.
+// Missing data is never a reason: a coin whose age or market cap has not been filled in yet is
+// simply not handed on this round, and the scout looks again next time it is refreshed.
+export function windowReason(record, { minAgeSeconds, maxAgeSeconds, minMarketCapUsd, maxMarketCapUsd }, ageSeconds) {
+  const age = Number.isFinite(ageSeconds) ? ageSeconds : null;
+  if (age === null) return { category: "no_age", detail: "age not known yet", wait: true };
+  if (age < minAgeSeconds) {
+    return { category: "too_young", detail: `${hours(age)} old, the desk starts at ${hours(minAgeSeconds)}` };
+  }
+  if (age > maxAgeSeconds) {
+    return { category: "too_old", detail: `${hours(age)} old, past the ${hours(maxAgeSeconds)} window` };
+  }
+
+  const mcap = Number.isFinite(record?.marketCapUsd) ? record.marketCapUsd : null;
+  if (mcap === null) return { category: "no_mcap", detail: "market cap not known yet", wait: true };
+  if (mcap < minMarketCapUsd) return { category: "mcap_low", detail: `${usd(mcap)} below ${usd(minMarketCapUsd)}` };
+  if (mcap > maxMarketCapUsd) return { category: "mcap_high", detail: `${usd(mcap)} above ${usd(maxMarketCapUsd)}` };
+  return null;
+}
+
+export function createScout({ config, universe, feed, logger, devBook, log, note, onScouted }) {
   const meter = createMeter(); // every sighting: how much work bot 1 is doing
   const newMeter = createMeter(); // coins seen for the first time
   const stats = {
     observations: 0, // every sighting, including re-sightings of the same coin
     coins: 0, // distinct coins screened since start
+    inWindow: 0, // sightings handed on to the filter
     launches: 0,
     migrations: 0,
     sweeps: 0,
     sweepRows: 0,
     refreshed: 0,
   };
+  const windowMisses = {}; // why coins were turned away: category -> count
   const sources = {}; // source name -> sightings
   const recent = []; // newest first, for the dashboard
   const lastLoggedAt = new Map();
-  const priority = new Set(); // mints bot 3 wants watched closely
+  const priority = new Set(); // mints the executor is acting on right now
   let jobIndex = 0;
   let discoveryTimer = null;
   let refreshTimer = null;
@@ -61,7 +88,8 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
     if (recent.length > RECENT_KEPT) recent.length = RECENT_KEPT;
   }
 
-  // One sighting of one coin: into the registry, into the log, on to bot 2.
+  // One sighting of one coin: into the registry, into the log, and — only if it is inside the
+  // window — on to the filter.
   function screen(update, source) {
     const now = Date.now();
     const record = universe.observe({ ...update, source }, now);
@@ -84,7 +112,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
         // Trim the oldest log stamps; worst case a coin gets logged twice in a minute.
         for (const key of [...lastLoggedAt.keys()].slice(0, 1000)) lastLoggedAt.delete(key);
       }
-      journal.write({
+      logger.sighting({
         type: firstSighting ? "new" : "seen",
         mint: record.mint,
         symbol: record.symbol,
@@ -102,7 +130,23 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
       if (firstSighting) remember(record, source);
     }
 
-    onScreened?.(record, { firstSighting, source, now });
+    // The handoff. A coin outside the window stays in the registry and keeps being refreshed — it
+    // may walk into the window later — but it is not passed on, and the reason is logged.
+    //
+    // Except for coins the executor is already acting on. The window says what the desk may START
+    // trading, never what it may keep watching: a position that collapses falls straight out of the
+    // market-cap band, and if that stopped the data reaching the executor the stop would never fire
+    // and the rug would be held to the time limit. Which is the exact coin that must be sold first.
+    const held = priority.has(record.mint);
+    const outside = held ? null : windowReason(record, config.window, universe.ageSeconds(record, now));
+    if (outside) {
+      windowMisses[outside.category] = (windowMisses[outside.category] ?? 0) + 1;
+      if (!outside.wait) logger.kill("scout", record, outside, now);
+      return record;
+    }
+
+    stats.inWindow += 1;
+    onScouted?.(record, { firstSighting, source, now });
     return record;
   }
 
@@ -112,7 +156,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
     if (!mint) return;
     stats.launches += 1;
     // The launch event is the only place the creator's wallet appears; the dev book remembers it so
-    // bot 2 can recognise a wallet that launches a coin a day or rugged one before.
+    // the filter can recognise a wallet that launched a coin a day or rugged one before.
     const creator = typeof event.traderPublicKey === "string" ? event.traderPublicKey : "";
     if (creator) devBook.recordLaunch(creator, mint);
     screen({
@@ -164,6 +208,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
         sellsH1: pool.tradesH1 !== null && pool.buysH1 !== null ? pool.tradesH1 - pool.buysH1 : null,
         tradesH1: pool.tradesH1,
         buyersH1: pool.buyersH1,
+        sellersH1: pool.sellersH1,
         priceChangeH1: pool.priceChangeH1,
         priceChangeH24: pool.priceChangeH24,
       }, `gecko:${job.kind}`);
@@ -171,8 +216,8 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
   }
 
   // ---------- DexScreener: fresh numbers for EVERY coin we know ----------
-  // Whoever is closest to a decision gets the data first — bot 3's open positions and watchlist,
-  // then bot 2's green and watched coins — and then the rotation works through the whole registry,
+  // Whoever is closest to a decision gets the data first — the executor's open positions and
+  // watchlist, then everything the filter passed — and then the rotation works through the registry,
   // oldest refresh first.
   //
   // The rotation covering everything is the point. A coin that went quiet is exactly the coin that
@@ -190,8 +235,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
 
     for (const mint of priority) add(mint);
     for (const record of universe.values()) {
-      const state = record.verdict?.state;
-      if (state === "green" || state === "watch") add(record.mint);
+      if (record.filter?.state === "pass") add(record.mint);
     }
     if (wanted.length >= limit) return wanted;
 
@@ -254,8 +298,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
     const targets = [];
     for (const record of universe.values()) {
       if (!record.pool) continue;
-      const state = record.verdict?.state;
-      if (state !== "green" && state !== "watch" && !priority.has(record.mint)) continue;
+      if (record.filter?.state !== "pass" && !priority.has(record.mint)) continue;
       targets.push(record);
     }
     if (!targets.length) return;
@@ -279,6 +322,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
         buysH1: pool.buysH1,
         tradesH1: pool.tradesH1,
         buyersH1: pool.buyersH1,
+        sellersH1: pool.sellersH1,
         priceChangeH1: pool.priceChangeH1,
       }, "gecko:pool");
     }
@@ -304,7 +348,7 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
         if (sweepsInFlight < config.maxSweepsInFlight && feed.canSweep()) {
           sweepsInFlight += 1;
           sweepOnce()
-            .catch((error) => log(`[bot1] sweep error: ${error.message}`))
+            .catch((error) => log(`[scout] sweep error: ${error.message}`))
             .finally(() => {
               sweepsInFlight -= 1;
             });
@@ -321,13 +365,14 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
           // every call here is one the sweep does not get to make.
           if (buyerTurn % 10 === 0) await refreshBuyers();
         } catch (error) {
-          log(`[bot1] refresh error: ${error.message}`);
+          log(`[scout] refresh error: ${error.message}`);
         }
         if (!stopping) refreshTimer = setTimeout(refreshLoop, config.refreshIntervalMs);
       };
       discoveryTimer = setTimeout(discoveryLoop, 1000);
       refreshTimer = setTimeout(refreshLoop, 2000);
-      log(`[bot1] Screening every coin, any age: ${DISCOVERY_PAGE_COUNT} GeckoTerminal pages round-robin at ${config.geckoCallsPerMinute} calls/min, evenly paced + every known coin re-checked on DexScreener at ${Math.round(refreshesPerMinute())} coins/min. Log: data/bot1-screened.jsonl`);
+      const w = config.window;
+      log(`[scout] Window: ${Math.round(w.minAgeSeconds / 60)}m-${Math.round(w.maxAgeSeconds / 3600)}h old, ${usd(w.minMarketCapUsd)}-${usd(w.maxMarketCapUsd)} market cap. Watching wider than that: ${DISCOVERY_PAGE_COUNT} GeckoTerminal pages round-robin at ${config.geckoCallsPerMinute} calls/min + every known coin re-checked on DexScreener at ${Math.round(refreshesPerMinute())} coins/min. Log: data/scout.jsonl`);
     },
 
     stop() {
@@ -349,6 +394,8 @@ export function createScreener({ config, universe, feed, journal, devBook, log, 
         geckoRate: feed.geckoRate?.() ?? null, // the rate the feed settled on, not the ceiling
         geckoPausedForMs: feed.geckoPausedForMs?.() ?? 0,
         sources: { ...sources },
+        windowMisses: { ...windowMisses },
+        window: { ...config.window },
         recent: recent.slice(0, 25),
       };
     },

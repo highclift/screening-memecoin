@@ -152,9 +152,9 @@
                     <th data-i18n="th.token">Koin</th>
                     <th data-i18n="th.age">Umur</th>
                     <th data-i18n="th.score">Skor &amp; alasan</th>
-                    <th data-i18n="th.surge">Volume vs jam biasanya</th>
+                    <th data-i18n="th.measured">Bagian terukur</th>
                     <th data-i18n="th.marketCap">Market cap USD</th>
-                    <th data-i18n="th.bot3">Bot 3</th>
+                    <th data-i18n="th.bot3">Eksekusi</th>
                   </tr></thead>
                   <tbody id="screenerBody"></tbody>
                 </table>
@@ -192,7 +192,7 @@
                   <div class="field-section-title" data-i18n="form.moneyTitle">Batas uang</div>
                   <div class="field-grid two-col">
                     <label><span data-i18n="form.startBalance">Saldo awal</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="paperStartBalanceSol" type="number" min="0.000001" step="any" value="1" /></label>
-                    <label><span data-i18n="form.buyAmount">Uang per pembelian</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="buyAmountSol" type="number" min="0.000001" step="any" value="0.01" /></label>
+                    <label><span data-i18n="form.positionPct">Porsi saldo per pembelian</span><span class="unit" data-i18n="unit.pct">%</span><input class="number-input settings-input" name="positionPct" type="number" min="0.1" max="100" step="any" value="8" data-scale="0.01" /></label>
                     <label><span data-i18n="form.maxOpen">Posisi bersamaan</span><input class="number-input settings-input" name="maxOpenPositions" type="number" min="1" max="100" step="1" value="3" /></label>
                     <label><span data-i18n="form.maxEntries">Batas beli per hari</span><input class="number-input settings-input" name="maxEntriesPerDay" type="number" min="1" max="10000" step="1" value="20" /></label>
                     <label><span data-i18n="form.maxDailyLoss">Batas rugi harian</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="maxDailyLossSol" type="number" min="0" step="any" value="0.05" /></label>

@@ -1,11 +1,11 @@
-// Pure math behind bot 2's verdict and bot 3's timing.
+// Pure math behind the analyst's score and the executor's timing.
 //
-// Nothing here reads config: every number is derived from the coin's OWN data. That is why bot 2
-// and bot 3 have no strategy settings to tune — a coin is measured against its own history, not
-// against a threshold somebody guessed.
+// Nothing here reads config: every number is derived from the coin's OWN data, or from a threshold
+// that means something on its own. That is why the analyst has no per-coin settings — a coin is
+// measured against itself, not against a number somebody guessed for it.
 //
-// Signals are 0..1. Unknown data returns a neutral value, never 0, so a coin is never punished for
-// a field a source did not report.
+// Parts are 0..1. Unknown data returns a neutral value, never 0, so a coin is never punished for a
+// field a source did not report — and never rewarded for one either.
 
 const clamp01 = (n) => Math.min(1, Math.max(0, n));
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
@@ -15,30 +15,8 @@ const round = (n, digits = 3) => {
 };
 const finite = (n) => Number.isFinite(n);
 
-// How much this coin trades in a NORMAL hour. For a coin younger than a day its 24h volume covers
-// only the hours it has existed, so the average is taken over those hours.
-export function hourlyBaselineUsd(record, ageSeconds = record?.ageSeconds) {
-  if (!finite(record?.volumeH24Usd) || record.volumeH24Usd <= 0) return null;
-  const hours = finite(ageSeconds) ? clamp(ageSeconds / 3600, 1, 24) : 24;
-  return record.volumeH24Usd / hours;
-}
-
-// THE re-pump signal: this hour's volume against a normal hour for this coin. A coin that launched
-// a month ago and has been quiet since sits at ~1 for weeks, then jumps the hour it wakes up.
-export function surgeRatio(record, ageSeconds = record?.ageSeconds) {
-  const baseline = hourlyBaselineUsd(record, ageSeconds);
-  if (!baseline || !finite(record?.volumeH1Usd)) return null;
-  return record.volumeH1Usd / baseline;
-}
-
-// How many times the pool's own liquidity changed hands this hour. This is what tells you a BRAND
-// NEW coin is hot: it has no history to compare against, but real money is moving through it.
-export function turnover(record) {
-  if (!finite(record?.volumeH1Usd) || !finite(record?.liquidityUsd) || record.liquidityUsd <= 0) return null;
-  return record.volumeH1Usd / record.liquidityUsd;
-}
-
-// Share of this hour's trades that were buys.
+// Share of this hour's trades that were buys. Used where the wallet counts are not available —
+// one wallet can make fifty trades, so this is the blunter of the two readings.
 export function buyShare(record) {
   const buys = finite(record?.buysH1) ? record.buysH1 : null;
   const trades = finite(record?.tradesH1) && record.tradesH1 > 0
@@ -48,7 +26,7 @@ export function buyShare(record) {
   return buys / trades;
 }
 
-// How far the coin has climbed off the lowest market cap this bot measured itself.
+// How far the coin has climbed off the lowest market cap this desk measured itself.
 export function reclaimPct(record) {
   const snapshots = record?.snapshots ?? [];
   if (snapshots.length < 2 || !finite(record.marketCapUsd)) return null;
@@ -60,75 +38,103 @@ export function reclaimPct(record) {
   return record.marketCapUsd / low - 1;
 }
 
-export const PUMP_WEIGHTS = {
-  surge: 0.30,       // volume waking up — the signal that works on new and month-old coins alike
-  buyPressure: 0.20, // buys outnumbering sells this hour
-  breadth: 0.20,     // how many different wallets are buying (one whale is not a pump)
-  momentum: 0.15,    // price actually moving up
-  depth: 0.15,       // liquidity deep enough that the move is not one trade bouncing off the walls
+// ---------------------------------------------------------------------------------------------
+// THE DESK SCORE, 0-100. What the analyst agent decides on.
+//
+// Six readings, each 0..1, each measured against the coin itself or against a number that means
+// something on its own. Unknown data scores a neutral 0.5 and is reported as unknown, so a coin is
+// never punished for a field a source did not fill in — and never rewarded for one either.
+//
+// Holder growth and smart money are the two that need a history, so they are the two that are
+// usually unknown on a coin the desk has just met. That is worth knowing when reading a score: a
+// 72 made of four measurements and two neutrals is a weaker 72 than one made of six measurements,
+// which is why `known` comes back with the score.
+export const DESK_WEIGHTS = {
+  momentum: 0.20, // price actually moving up, before the move is over
+  uniqueBuyers: 0.20, // how many DIFFERENT wallets bought this hour
+  buySellRatio: 0.15, // buying pressure against selling pressure
+  holderGrowth: 0.20, // is the holder count growing, measured over our own samples
+  liqMcap: 0.15, // how deep the pool is for the size of the coin
+  smartWallets: 0.10, // do wallets with a record of being early show up in the buyers
 };
 
-// Scores a coin's chance of pumping (or pumping AGAIN). Returns the score, every part, and the
-// strongest part, which is what the bot 2 log line quotes as its reason.
-export function pumpScore(record, ageSeconds = record?.ageSeconds) {
+// Holders per hour, as a fraction, from the samples the desk took itself. Needs two samples at
+// least `minSpanMs` apart — before that there is no rate to speak of, only a number.
+export function holderGrowthPerHour(samples = [], { minSpanMs = 4 * 60_000 } = {}) {
+  const points = (samples ?? []).filter((s) => finite(s?.holders) && s.holders > 0 && finite(s?.at));
+  if (points.length < 2) return null;
+  const first = points[0];
+  const last = points[points.length - 1];
+  const spanMs = last.at - first.at;
+  if (spanMs < minSpanMs) return null;
+  return (last.holders / first.holders - 1) * (3_600_000 / spanMs);
+}
+
+export function deskScore(record, { smartCrowd = null } = {}) {
   const parts = {};
+  const known = {};
+  const set = (name, value) => {
+    known[name] = value !== null;
+    parts[name] = value === null ? 0.5 : clamp01(value);
+  };
 
-  // Surge: the better of "loud compared to its own history" and "loud compared to its own pool".
-  // Which of the two won is reported, because they mean different things to a reader: the first is
-  // a coin waking up, the second is a coin with no history worth comparing against.
-  const ratio = surgeRatio(record, ageSeconds);
-  const turns = turnover(record);
-  const fromRatio = ratio === null ? null : clamp01((ratio - 1) / 4); // 1x = 0, 5x+ = 1
-  const fromTurnover = turns === null ? null : clamp01(turns / 3); // 3x the pool in an hour = 1
-  let surgeFrom = null;
-  if (fromRatio === null && fromTurnover === null) {
-    parts.surge = 0.3; // no volume data at all: cannot confirm a surge, so lean low rather than neutral
-  } else if ((fromRatio ?? 0) >= (fromTurnover ?? 0)) {
-    parts.surge = fromRatio ?? 0;
-    surgeFrom = "baseline";
-  } else {
-    parts.surge = fromTurnover ?? 0;
-    surgeFrom = "turnover";
-  }
-
-  const share = buyShare(record);
-  parts.buyPressure = share === null ? 0.5 : clamp01((share - 0.45) / 0.25); // 45% = 0, 70%+ = 1
-
-  const buyers = finite(record?.buyersH1) ? record.buyersH1 : null;
-  parts.breadth = buyers === null ? 0.5 : clamp01(buyers / 60);
-
+  // 1. Momentum. The top of the range is deliberately short of the filter's +80% kill: by the time
+  //    a coin has doubled in an hour the move being scored is one somebody else already had.
   const changeH1 = finite(record?.priceChangeH1) ? record.priceChangeH1 : null;
   const reclaim = reclaimPct(record);
-  const fromChange = changeH1 === null ? null : clamp01((changeH1 + 5) / 25); // -5% = 0, +20%+ = 1
-  const fromReclaim = reclaim === null ? null : clamp01(reclaim / 0.15); // +15% off our low = 1
-  parts.momentum = fromChange === null && fromReclaim === null
-    ? 0.5
-    : Math.max(fromChange ?? 0, fromReclaim ?? 0);
+  const fromChange = changeH1 === null ? null : (changeH1 + 5) / 45; // -5% = 0, +40% = 1
+  const fromReclaim = reclaim === null ? null : reclaim / 0.2; // +20% off our own low = 1
+  set("momentum", fromChange === null && fromReclaim === null ? null : Math.max(fromChange ?? 0, fromReclaim ?? 0));
 
-  const depthRatio = finite(record?.liquidityUsd) && finite(record?.marketCapUsd) && record.marketCapUsd > 0
+  // 2. Different wallets, not trades. 100 distinct buyers in an hour is a crowd at this size.
+  const buyers = finite(record?.buyersH1) ? record.buyersH1 : null;
+  set("uniqueBuyers", buyers === null ? null : buyers / 100);
+
+  // 3. Buying against selling, counted in wallets when both are known (a sharper reading than the
+  //    trade split: one wallet can make fifty trades) and in trades when they are not.
+  const sellers = finite(record?.sellersH1) ? record.sellersH1 : null;
+  const share = buyShare(record);
+  const walletRatio = buyers !== null && sellers !== null && buyers + sellers > 0
+    ? buyers / (buyers + sellers)
+    : null;
+  const ratio = walletRatio ?? share;
+  set("buySellRatio", ratio === null ? null : (ratio - 0.45) / 0.25); // 45% = 0, 70%+ = 1
+
+  // 4. Holder growth, from the desk's own samples. +10% an hour = 1.
+  const growth = holderGrowthPerHour(record?.holderCounts);
+  set("holderGrowth", growth === null ? null : growth / 0.1);
+
+  // 5. Depth for the size of the coin.
+  const depth = finite(record?.liquidityUsd) && finite(record?.marketCapUsd) && record.marketCapUsd > 0
     ? record.liquidityUsd / record.marketCapUsd
     : null;
-  parts.depth = depthRatio === null ? 0.5 : clamp01(depthRatio / 0.1); // 10% of market cap = 1
+  set("liqMcap", depth === null ? null : (depth - 0.02) / 0.08); // 2% = 0, 10%+ = 1
 
-  let score = 0;
-  for (const [name, weight] of Object.entries(PUMP_WEIGHTS)) score += weight * parts[name];
+  // 6. Smart money. Already 0..1 from the registry, which returns null until it knows any of the
+  //    wallets buying — on night one that is every coin, and a neutral 0.5 is the honest answer.
+  set("smartWallets", smartCrowd === null || !finite(smartCrowd?.score) ? null : smartCrowd.score);
 
-  let lead = "surge";
+  let total = 0;
+  for (const [name, weight] of Object.entries(DESK_WEIGHTS)) total += weight * parts[name];
+
+  let lead = "momentum";
   let best = -1;
-  for (const [name, weight] of Object.entries(PUMP_WEIGHTS)) {
-    if (parts[name] * weight > best) {
+  for (const [name, weight] of Object.entries(DESK_WEIGHTS)) {
+    if (known[name] && parts[name] * weight > best) {
       best = parts[name] * weight;
       lead = name;
     }
   }
 
   return {
-    score: round(score),
+    score: Math.round(total * 100),
     lead,
-    surgeFrom,
-    surgeRatio: ratio === null ? null : round(ratio, 2),
-    turnover: turns === null ? null : round(turns, 2),
+    measured: Object.values(known).filter(Boolean).length,
+    of: Object.keys(DESK_WEIGHTS).length,
+    known,
     parts: Object.fromEntries(Object.entries(parts).map(([name, value]) => [name, round(value)])),
+    holderGrowthPerHour: growth === null ? null : round(growth, 3),
+    smartKnown: smartCrowd?.known ?? 0,
   };
 }
 
@@ -155,54 +161,6 @@ export function volatilityPct(snapshots = [], { windowMs = 300_000, now = Date.n
   const meanDt = sumDt / steps;
   // A price walks, so a move over one minute is about sqrt(minute / sample gap) times a sample move.
   return clamp(meanStep * Math.sqrt(60_000 / meanDt), 0.005, 0.25);
-}
-
-// Everything bot 3 needs to time one trade, derived from that coin's own volatility. A coin that
-// swings 10% a minute gets wide stops and little patience; a steady one gets tight stops and time.
-//
-// The shape is: a FLAT stop below entry that never moves down, and a TRAILING stop under the peak
-// that does the profit-taking. There is no fixed take-profit target, because a target caps a winner
-// at exactly the moment it is working. A trade that has run far enough also ratchets its flat floor
-// up to break-even, so a winner cannot turn back into a loss.
-//
-// `costPct` is what a round trip costs (fee + slippage, both sides). No stop may sit inside that:
-// a trailing stop tighter than the spread fires on noise and books a loss the price never made.
-export function deriveLevels(volPct, costPct = 0, maxLossPct = 1) {
-  const v = finite(volPct) && volPct > 0 ? volPct : 0.03;
-  const cost = finite(costPct) && costPct > 0 ? costPct : 0;
-  // The hard ceiling wins over the coin's own volatility, but never squeezes a stop inside the
-  // round-trip cost — a stop there fires on the spread alone.
-  const ceiling = Math.max(finite(maxLossPct) ? maxLossPct : 1, cost * 1.5);
-  const capped = (value) => Math.min(value, ceiling);
-  return {
-    volPct: round(v, 4),
-    costPct: round(cost, 4),
-    dipPct: round(clamp(v * 1.2, 0.04, 0.35), 4), // pullback that has to happen before we look at it
-    bouncePct: round(clamp(v * 0.6, 0.015, 0.12), 4), // reclaim off the low that confirms buyers returned
-
-    // The flat stop. Fixed at entry, never trails down, and never wider than the hard ceiling.
-    stopPct: round(capped(clamp(v * 2.5, Math.max(0.08, cost * 1.5), 0.3)), 4),
-    maxLossPct: round(ceiling, 4),
-    // Once the peak has been this far up, the flat floor ratchets to break-even (entry + costs) and
-    // the trail tightens. This is the only thing that ever moves the floor, and only upwards.
-    lockPct: round(clamp(v * 3.0, Math.max(0.1, cost * 2), 0.6), 4),
-    breakEvenPct: round(cost, 4),
-
-    // The trailing take-profit, measured from the highest point since entry.
-    trailPct: round(capped(clamp(v * 2.0, Math.max(0.06, cost * 1.5), 0.25)), 4),
-    // After lockPct it tightens — but only to 1.5x the coin's own move, not 1x. Tightening too far
-    // stops a runner out on an ordinary wiggle, which is the opposite of letting profit run.
-    tightTrailPct: round(clamp(v * 1.5, Math.max(0.05, cost), 0.2), 4),
-
-    // A trade that is NOT in profit and has stopped making highs is not working; one that IS in
-    // profit is left alone, because the trailing stop is what should end it.
-    stallMs: Math.round(clamp(120_000 * (0.03 / v), 60_000, 600_000)),
-    // A hard cap measured from ENTRY. These coins pump fast and die fast: in the measured session
-    // every long hold that ended badly was a rug arriving after the move was over, and capping at
-    // ten minutes turned -1.05 SOL into -0.53 SOL across the same trades. It costs a little upside
-    // on the rare coin that keeps climbing, and that is the trade being made deliberately.
-    maxHoldMs: finite(maxHoldMs) && maxHoldMs > 0 ? maxHoldMs : 10 * 60_000,
-  };
 }
 
 // What one round trip costs in price terms, from the simulated fee and slippage per side.

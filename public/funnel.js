@@ -34,18 +34,22 @@ function ensureFunnelTiles() {
   return row;
 }
 
+// Every refusal, from every agent, as one list. It is built from the logger rather than from the
+// filter alone, because the question a reader has is "why did nothing get bought tonight?" and the
+// answer is as often the scout's window or the risk agent's daily limit as it is a safety rule.
 function renderFunnel(status = {}) {
   if (!ensureFunnelTiles()) return;
   const filter = status.bots?.filter ?? {};
-  setNumber(document.querySelector("#funnelJudged"), filter.evaluated ?? 0, fmtInt);
-  setNumber(document.querySelector("#funnelWatching"), filter.watch ?? 0, fmtInt);
-  setNumber(document.querySelector("#funnelRugs"), filter.rugs ?? 0, fmtInt);
+  const logger = status.bots?.logger ?? {};
+  setNumber(document.querySelector("#funnelJudged"), filter.judged ?? 0, fmtInt);
+  setNumber(document.querySelector("#funnelWatching"), status.bots?.analyst?.passingNow ?? 0, fmtInt);
+  setNumber(document.querySelector("#funnelRugs"), logger.kills ?? 0, fmtInt);
   setText(document.querySelector("#funnelHolderCheck"), filter.holderCheck ? t("funnel.on") : t("funnel.off"));
 
   const list = document.querySelector("#funnelList");
   if (!list) return;
   list.replaceChildren();
-  const rows = Object.entries(filter.categories ?? {}).sort((a, b) => b[1] - a[1]);
+  const rows = Object.entries(logger.byCategory ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -53,7 +57,7 @@ function renderFunnel(status = {}) {
     list.append(empty);
     return;
   }
-  const judged = Math.max(Number(filter.evaluated ?? 0), 1);
+  const judged = Math.max(Number(logger.kills ?? 0), 1);
   for (const [category, count] of rows) {
     const row = document.createElement("div");
     row.className = "screener-debug-row info";

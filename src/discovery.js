@@ -172,7 +172,10 @@ export function parseGeckoPool(row, nowMs = Date.now()) {
     priceChangeH24: num(a.price_change_percentage?.h24),
     buysH1: buys,
     tradesH1: buys !== null && sells !== null ? buys + sells : null,
+    // Distinct wallets, not transactions. The pair of them is the useful part: more wallets
+    // leaving than arriving is distribution, whatever the volume looks like.
     buyersH1: num(h1.buyers),
+    sellersH1: num(h1.sellers),
   };
 }
 

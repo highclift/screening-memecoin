@@ -36,16 +36,23 @@ const enSet = new Set(keys.en);
 
 // Keys built at runtime from a variable, with the values that variable can take.
 const DYNAMIC = [
-  // One row per bot, plus the badge humanize.js puts on a log line from one of the three stages.
-  ...["screener", "filter", "executor", "storage"].flatMap((bot) => [`bot.${bot}.name`, `bot.${bot}.task`]),
-  ...["screener", "filter", "executor"].map((bot) => `bot.${bot}.badge`),
+  // One row per agent, plus the badge humanize.js puts on a log line from one of the stages.
+  ...["scout", "filter", "analyst", "executor", "risk", "logger"]
+    .flatMap((bot) => [`bot.${bot}.name`, `bot.${bot}.task`, `bot.${bot}.badge`]),
   ...["running", "idle", "trading", "blocked", "starting", "stopped"].map((state) => `bot.state.${state}`),
-  ...["surge", "buyPressure", "breadth", "momentum", "depth"].map((lead) => `lead.${lead}`),
+  // The analyst's six score parts (DESK_WEIGHTS) and the older pump-score names.
+  ...["momentum", "uniqueBuyers", "buySellRatio", "holderGrowth", "liqMcap", "smartWallets"].map((lead) => `lead.${lead}`),
+  ...["surge", "buyPressure", "breadth", "depth"].map((lead) => `lead.${lead}`),
   ...["measure", "dip", "high", "bounce", "buyers", "spike", "data", "entry", "unknown"].map((state) => `waiting.${state}`),
-  // Bot 2's gate categories (src/filters.js) and the states it reports.
-  ...["market_cap", "liquidity", "liquidity_ratio", "dead", "dead_volume", "holders", "dev_history",
-    "low_score", "no_data", "building", "holders_pending", "green", "rugged",
-    "mint_authority", "freeze_authority", "fresh_wallets", "unknown"].map((c) => `reason.${c}`),
+  // Every kill category any agent can report: the scout's window (scout.js), the filter's hard
+  // kills (filter.js + filters.js), the analyst's pass mark, and the risk agent's money limits.
+  ...["too_young", "too_old", "mcap_low", "mcap_high",
+    "market_cap", "liquidity", "liquidity_ratio", "dead", "dead_volume", "holders", "dev_history",
+    "lp_unlocked", "dev_holding", "bundled", "pumped_already", "safety_pending", "below_score",
+    "money_limit", "pass", "no_data", "holders_pending", "buyers_pending", "rugged",
+    "few_buyers", "wash_trading", "distribution",
+    "mint_authority", "freeze_authority", "fresh_wallets", "wallet_cluster", "linked_supply",
+    "linked_wallets", "unknown"].map((c) => `reason.${c}`),
   // Bot 3's exit reasons (src/bots/executor.js).
   ...["stop-loss", "break-even", "trail", "trail-locked", "stall", "breakdown", "max-hold",
     "max-hold-total", "max-hold-stale", "manual", "exit"]
@@ -338,6 +345,17 @@ test("every sidebar link points at a section that exists and is not inside anoth
     if (id === "bots" || id === "overview") continue;
     assert.ok(at < botsAt || at > botsEnd, `#${id} sits inside the bots panel`);
   }
+});
+
+test("every dashboard POST goes through the helper that survives a non-JSON reply", () => {
+  // A server running older code answers an unknown route with an HTML error page. Calling
+  // response.json() on that throws "Unexpected token '<'", which tells nobody anything, so every
+  // call site must use postJson instead of fetch directly.
+  const app = read("app.js");
+  const direct = [...app.matchAll(/await fetch\("(\/api\/[^"]+)"/g)].map((m) => m[1]);
+  // /api/state is a GET on a timer and handles its own failure; the rest must go through postJson.
+  assert.deepEqual(direct.filter((path) => path !== "/api/state"), []);
+  assert.ok(app.includes("async function postJson"), "the helper is gone");
 });
 
 test("no dictionary key is left over from the three-lane design", () => {

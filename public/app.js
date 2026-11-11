@@ -39,12 +39,36 @@ function tokenReference(label, item, className) {
   element.className = className;
   element.textContent = label;
   if (!isSyntheticToken(item)) {
-    element.href = `https://trenchly.gg/trade/${encodeURIComponent(item.mint)}`;
+    element.href = `https://axiom.trade/token/${encodeURIComponent(item.mint)}`;
     element.target = "_blank";
     element.rel = "noreferrer";
     element.title = item.mint;
   }
   return element;
+}
+
+// Every call to the dashboard server goes through here. A reply is not always JSON: a route that
+// does not exist in the running server answers with an HTML error page, and parsing that throws
+// "Unexpected token '<'", which tells nobody anything. This turns it into a sentence that does.
+async function postJson(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  if (result === null) {
+    throw new Error(response.status === 404
+      ? t("msg.staleServer")
+      : t("msg.badResponse", { status: response.status }));
+  }
+  if (!response.ok) throw new Error(result.error || t("msg.badResponse", { status: response.status }));
+  return result;
 }
 
 function showMessage(key, params, isError = false) {
@@ -123,19 +147,28 @@ onLangChange(() => {
   refresh();
 });
 
-// Only money limits are left in the form: every strategy number is decided by bot 2 and bot 3.
+// Only money limits are left in the form: the window, the kill list and the pass mark are the
+// desk's definition of itself and live in .env.
+//
+// A field may be shown in friendlier units than it is stored in (`data-scale`): the position size
+// is a fraction everywhere in the code and a percentage in the form, because nobody thinks in 0.08.
+const scaleOf = (input) => Number(input?.dataset?.scale) || 1;
+
 function applySettings(settings) {
   for (const [name, rawValue] of Object.entries(settings ?? {})) {
     const input = strategyForm.elements.namedItem(name);
     if (!input || document.activeElement === input) continue;
-    input.value = String(rawValue);
+    const scale = scaleOf(input);
+    const value = Number(rawValue);
+    input.value = String(scale === 1 || !Number.isFinite(value) ? rawValue : Number((value / scale).toFixed(6)));
   }
 }
 
 function collectSettings() {
   const settings = {};
   for (const [name, rawValue] of new FormData(strategyForm).entries()) {
-    settings[name] = Number(rawValue);
+    const input = strategyForm.elements.namedItem(name);
+    settings[name] = Number(rawValue) * scaleOf(input);
   }
   return settings;
 }
@@ -264,13 +297,7 @@ async function closePositions(mint, label) {
   const question = mint ? t("msg.closeConfirm", { token: label }) : t("msg.closeAllConfirm");
   if (!window.confirm(question)) return;
   try {
-    const response = await fetch("/api/close", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(mint ? { mint } : {}),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Could not close the position.");
+    await postJson("/api/close", mint ? { mint } : {});
     showMessage(mint ? "msg.closed" : "msg.closedAll");
     await refresh();
   } catch (error) {
@@ -473,16 +500,16 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
   );
   const newestServerError = serverErrors[0]?.message;
   const newestClientError = clientDiagnostics.find((entry) => entry.level === "error")?.message;
-  // Bot 1 is seeing coins but bot 2 cannot judge any of them: that means the market data is not
-  // arriving, which looks identical to "nothing is pumping" unless it is called out.
-  const bot1 = screener.bots?.screener ?? {};
+  // The scout is seeing coins but the filter cannot judge any of them: that means the market data
+  // is not arriving, which looks identical to "nothing is pumping" unless it is called out.
+  const bot1 = screener.bots?.scout ?? {};
   const bot2 = screener.bots?.filter ?? {};
   const waitingForData = Number(bot2.categories?.no_data ?? 0);
   const dataMissing = runtime.status === "running"
     && runtime.feedConnected
     && Number(bot1.coins ?? 0) >= 20
-    && Number(bot2.evaluated ?? 0) > 0
-    && Number(bot2.green ?? 0) + Number(bot2.red ?? 0) === 0
+    && Number(bot2.judged ?? 0) > 0
+    && Number(bot2.passed ?? 0) + Number(bot2.killed ?? 0) === 0
     && waitingForData >= 10;
 
   let titleKey = "startup.ready";
@@ -572,13 +599,15 @@ function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
   }
 }
 
-// The green list: what bot 2 says can pump, and what bot 3 is doing about each one.
+// The candidate list: what the analyst scored at or above the pass mark, and what the executor is
+// doing about each one.
 function renderScreener(status = {}, runtime = {}) {
   const bots = status.bots ?? {};
   const filter = bots.filter ?? {};
+  const analyst = bots.analyst ?? {};
   const executor = bots.executor ?? {};
-  const screener = bots.screener ?? {};
-  const greenList = Array.isArray(filter.greenList) ? filter.greenList : [];
+  const screener = bots.scout ?? {};
+  const greenList = Array.isArray(analyst.candidates) ? analyst.candidates : [];
 
   let phaseKey = "screener.stopped";
   if (runtime.status === "starting") phaseKey = "screener.starting";
@@ -590,15 +619,15 @@ function renderScreener(status = {}, runtime = {}) {
   phase.classList.toggle("error", runtime.status === "error");
   phase.classList.toggle("active", runtime.status === "running" && Boolean(runtime.feedConnected));
 
-  setNumber($("#screenerActiveCount"), filter.greenNow ?? 0, fmtInt);
-  setText($("#screenerCapacity"), fmtInt(filter.maxGreen ?? 60));
+  setNumber($("#screenerActiveCount"), analyst.passingNow ?? 0, fmtInt);
+  setText($("#screenerCapacity"), fmtInt(analyst.passScore ?? 70));
   setNumber($("#statScreened"), screener.coins ?? 0, fmtInt);
   setNumber($("#statPerMinute"), screener.newPerMinute ?? 0, fmtInt);
-  setNumber($("#statRejected"), filter.red ?? 0, fmtInt);
+  setNumber($("#statRejected"), bots.logger?.kills ?? 0, fmtInt);
   setNumber($("#statBought"), executor.entries ?? 0, fmtInt);
   if (typeof renderFunnel === "function") renderFunnel(status);
 
-  // What bot 3 is doing with each green coin, keyed by mint.
+  // What the executor is doing with each candidate, keyed by mint.
   const bot3State = new Map();
   for (const position of Array.isArray(executor.positions) ? executor.positions : []) {
     bot3State.set(position.mint, { text: t("bot3.holding"), className: "positive" });
@@ -644,7 +673,7 @@ function renderScreener(status = {}, runtime = {}) {
     scoreCell.append(scoreHead, scoreWhy);
 
     const surgeCell = document.createElement("td");
-    surgeCell.textContent = surgeText(coin);
+    surgeCell.textContent = measuredText(coin);
 
     const mcCellEl = document.createElement("td");
     mcCellEl.textContent = fmtUsdExact(coin.marketCapUsd);
@@ -706,18 +735,7 @@ strategyForm.addEventListener("submit", async (event) => {
   const button = $("#startButton");
   button.disabled = true;
   try {
-    const response = await fetch("/api/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: $("#apiKey").value, settings: collectSettings() }),
-    });
-    let result;
-    try {
-      result = await response.json();
-    } catch {
-      throw new Error(`Server replied HTTP ${response.status} with a non-JSON response.`);
-    }
-    if (!response.ok) throw new Error(result.error || "Could not start the scanner.");
+    await postJson("/api/start", { apiKey: $("#apiKey").value, settings: collectSettings() });
     $("#apiKey").value = "";
     showMessage("msg.started");
     await refresh();
@@ -735,13 +753,7 @@ async function applyLiveSettings() {
   button.disabled = true;
   showMessage("msg.applying");
   try {
-    const response = await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ settings: collectSettings() }),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Could not update the strategy.");
+    await postJson("/api/settings", { settings: collectSettings() });
     showMessage("msg.applied");
     await refresh();
   } catch (error) {
@@ -756,9 +768,7 @@ $("#applySettingsButton").addEventListener("click", applyLiveSettings);
 
 $("#stopButton").addEventListener("click", async () => {
   try {
-    const response = await fetch("/api/stop", { method: "POST" });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Could not stop the scanner.");
+    await postJson("/api/stop");
     showMessage("msg.stopping");
     await refresh();
   } catch (error) {
@@ -772,13 +782,7 @@ $("#resetButton").addEventListener("click", async () => {
   const balance = Number(strategyForm.elements.namedItem("paperStartBalanceSol").value);
   if (!window.confirm(t("msg.resetConfirm", { balance }))) return;
   try {
-    const response = await fetch("/api/reset-account", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ balanceSol: balance }),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Could not reset the account.");
+    await postJson("/api/reset-account", { balanceSol: balance });
     showMessage("msg.reset");
     await refresh();
   } catch (error) {

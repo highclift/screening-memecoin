@@ -14,11 +14,11 @@ const PORT = Number(process.env.WEB_PORT ?? 3000);
 const HOST = "127.0.0.1";
 const app = express();
 
-// Money limits are the only settings left: bot 2 and bot 3 decide the rest from the coins
-// themselves (see src/signals.js), so there is nothing else for the dashboard to ask for.
+// Money limits are the only settings the dashboard asks for. The window, the kill list and the
+// pass mark are the desk's definition of itself and live in .env, not in a form.
 const DEFAULT_SETTINGS = {
   paperStartBalanceSol: 1,
-  buyAmountSol: 0.01,
+  positionPct: 0.08,
   maxOpenPositions: 3,
   maxEntriesPerDay: 20,
   maxDailyLossSol: 0.05,
@@ -26,7 +26,7 @@ const DEFAULT_SETTINGS = {
 
 const SETTINGS_TO_ENV = {
   paperStartBalanceSol: "PAPER_START_BALANCE_SOL",
-  buyAmountSol: "BUY_AMOUNT_SOL",
+  positionPct: "POSITION_PCT",
   maxOpenPositions: "MAX_OPEN_POSITIONS",
   maxEntriesPerDay: "MAX_ENTRIES_PER_DAY",
   maxDailyLossSol: "MAX_DAILY_LOSS_SOL",
@@ -362,6 +362,13 @@ app.post("/api/reset-account", (req, res) => {
   activeSettings.paperStartBalanceSol = balance;
   addLog(`Paper account direset ke ${balance} SOL.`);
   res.json({ ok: true });
+});
+
+// Anything under /api that no route above handled. Without this Express answers with its HTML
+// error page, and the dashboard's `response.json()` fails with "Unexpected token '<'", which says
+// nothing about the real problem — usually a server still running an older build.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `No API route ${req.method} /api${req.path}. If you just updated the code, restart the dashboard.` });
 });
 
 const httpServer = app.listen(PORT, HOST, () => {

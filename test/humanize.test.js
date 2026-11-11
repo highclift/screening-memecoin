@@ -29,7 +29,7 @@ function loadHumanizer() {
   const source = fs.readFileSync(path.join(publicDir, "humanize.js"), "utf8");
   const t = (key) => (definedKeys.has(key) ? `TEXT:${key}` : key);
   const tn = (key) => t(key);
-  const factory = new Function("t", "tn", `${source}\nreturn { humanizeLog, categoryLabel, leadText, waitingText, surgeText, fmtScore };`);
+  const factory = new Function("t", "tn", `${source}\nreturn { humanizeLog, categoryLabel, leadText, waitingText, surgeText, measuredText, fmtScore };`);
   return factory(t, tn);
 }
 
@@ -37,27 +37,28 @@ const h = loadHumanizer();
 
 // Exactly what src/index.js, src/feed.js and the three bots print. Keep in step with them.
 const WORKER_LINES = [
-  "[start] mode=paper paper balance=1.00000 SOL, 0.01 SOL per trade, max 3 open, max 20 entries/day, daily loss limit 0.05 SOL.",
-  "[pipeline] bot 1 screens every coin (any age) -> bot 2 judges can-it-pump -> bot 3 times entry and exit. No strategy settings: bot 3 measures each coin and sets its own stops.",
-  "[pipeline] bot 2 turns a coin green at score 0.58; holder check OFF (set SOLANA_RPC_URL); dev history max 1 rug / 5 launches.",
-  "[shutdown] Paper account saved; all three bots stopped.",
-  "[bot1] Screening every coin, any age: 17 GeckoTerminal pages round-robin at 15 calls/min, evenly paced + every known coin re-checked on DexScreener at 2700 coins/min. Log: data/bot1-screened.jsonl",
-  "[bot1] sweep error: fetch failed",
-  "[bot1] refresh error: terminated",
-  "[bot2] GREEN JEANPHIL score=0.82 (surge, volume 18.0x its normal hour) age=30d",
-  "[bot2] GREEN OnlyCats score=0.844 (surge, 2.4x the pool traded in an hour) age=12h",
-  "[bot2] GREEN PEPE score=0.61 (breadth) age=12h",
-  "[bot2] PEPE is no longer green: 1h volume $900 below $2,000.",
-  "[bot3] BUY JEANPHIL MC=$450,000 after a 12.3% dip and a 4.1% bounce | stop 10.0% trail 8.0% (this coin moves ~4.0%/min)",
-  "[bot3] SELL:trail JEANPHIL MC=$430,000 pnl=-0.00120 SOL | balance=0.99880 SOL",
-  "[bot3] SELL:trail-locked PEPE MC=$510,000 pnl=+0.00240 SOL | balance=1.00240 SOL",
-  "[bot3] SELL:stop-loss PEPE MC=$390,000 pnl=-0.00180 SOL | balance=0.99820 SOL",
-  "[bot3] SELL:break-even PEPE MC=$460,000 pnl=-0.00002 SOL | balance=0.99998 SOL",
-  "[bot3] SELL:max-hold-total PEPE MC=$470,000 pnl=+0.00030 SOL | balance=1.00030 SOL",
-  "[bot3] SELL:stall PEPE MC=$455,000 pnl=+0.00010 SOL | balance=1.00010 SOL",
-  "[bot3] SELL:breakdown PEPE MC=$410,000 pnl=-0.00090 SOL | balance=0.99910 SOL",
-  "[bot3] SELL:max-hold PEPE MC=$452,000 pnl=+0.00005 SOL | balance=1.00005 SOL",
-  "[bot3] SELL:max-hold-stale PEPE MC=$452,000 pnl=+0.00005 SOL | balance=1.00005 SOL",
+  "[start] mode=paper paper balance=1.00000 SOL, 8% per trade (0.08000 SOL now), max 3 open, max 20 entries/day, daily loss limit 0.05 SOL.",
+  "[desk] scout -> filter -> analyst -> executor <-> risk, and every kill goes to the logger.",
+  "[desk] window 30m-72h old, $300k-$20M | pass mark 70/100 | stop -6%, trail 8% once +12%.",
+  "[desk] safety: LP >= 90% burned/locked, dev <= 3%, bundled <= 10%, liquidity >= $25k; holder graph OFF (set SOLANA_RPC_URL).",
+  "[shutdown] Paper account saved; all six agents stopped.",
+  "[scout] Window: 30m-72h old, $300,000-$20,000,000 market cap. Watching wider than that: 17 GeckoTerminal pages round-robin at 15 calls/min + every known coin re-checked on DexScreener at 2700 coins/min. Log: data/scout.jsonl",
+  "[scout] sweep error: fetch failed",
+  "[scout] refresh error: terminated",
+  "[filter] 4iJ7xEQr collapsed while held; banned from now on (3 banned).",
+  "[analyst] JEANPHIL scores 82/100 (momentum leading, 5/6 parts measured) -> executor",
+  "[analyst] OnlyCats scores 71/100 (uniqueBuyers leading, 4/6 parts measured) -> executor",
+  "[executor] BUY JEANPHIL $450,000 score=82 dip-and-bounce | 0.08000 SOL, stop -6%, trail 8% after +12%",
+  "[executor] BUY PEPE $450,000 score=? breakout | 0.08000 SOL, stop -6%, trail 8% after +12%",
+  "[executor] SELL:trail JEANPHIL $430,000 pnl=-0.00120 SOL | balance=0.99880 SOL",
+  "[executor] SELL:trail-locked PEPE $510,000 pnl=+0.00240 SOL | balance=1.00240 SOL",
+  "[executor] SELL:stop-loss PEPE $390,000 pnl=-0.00180 SOL | balance=0.99820 SOL",
+  "[executor] SELL:break-even PEPE $460,000 pnl=-0.00002 SOL | balance=0.99998 SOL",
+  "[executor] SELL:stall PEPE $455,000 pnl=+0.00010 SOL | balance=1.00010 SOL",
+  "[executor] SELL:breakdown PEPE $410,000 pnl=-0.00090 SOL | balance=0.99910 SOL",
+  "[executor] SELL:max-hold PEPE $452,000 pnl=+0.00005 SOL | balance=1.00005 SOL",
+  "[executor] SELL:max-hold-stale PEPE $452,000 pnl=+0.00005 SOL | balance=1.00005 SOL",
+  "[executor] MANUAL EXIT: closed 2 positions on request.",
   "[feed] GeckoTerminal rate limited; pausing coin discovery for 30s and slowing to 7 calls/min (DexScreener and the launch feed keep running).",
   "[feed] GeckoTerminal back at full speed (15 calls/min).",
   "[feed] GeckoTerminal trending page 2 failed: HTTP 503",
@@ -123,26 +124,29 @@ test("placeholders in the matched sentence are all filled", () => {
 });
 
 test("the three bots are named in the lines they produce", () => {
-  assert.equal(h.humanizeLog("[bot1] sweep error: x").bot, "screener");
-  assert.equal(h.humanizeLog("[bot2] GREEN A score=0.6 (surge) age=1h").bot, "filter");
-  assert.equal(h.humanizeLog("[bot3] SELL:stall A MC=$1 pnl=+0.00001 SOL").bot, "executor");
+  assert.equal(h.humanizeLog("[scout] sweep error: x").bot, "scout");
+  assert.equal(h.humanizeLog("[analyst] A scores 80/100 (momentum leading, 6/6 parts measured) -> executor").bot, "analyst");
+  assert.equal(h.humanizeLog("[executor] SELL:stall A $1 pnl=+0.00001 SOL").bot, "executor");
+  assert.equal(h.humanizeLog("[filter] ABC collapsed while held; banned from now on (1 banned).").bot, "filter");
   assert.equal(h.humanizeLog("[web] up").bot, "", "server lines belong to no bot");
 });
 
-test("a surge is quoted when the log line carries one", () => {
-  const withSurge = h.humanizeLog("[bot2] GREEN JEAN score=0.82 (surge, volume 18.0x its normal hour) age=30d");
-  assert.equal(withSurge.key, "ev.bot2.greenSurge");
-  assert.equal(withSurge.params.times, "18.0");
-  assert.equal(withSurge.params.age, "30d");
+test("the analyst's line keeps the score, the leading part and how much was measured", () => {
+  const item = h.humanizeLog("[analyst] JEAN scores 82/100 (holderGrowth leading, 5/6 parts measured) -> executor");
+  assert.equal(item.key, "ev.analyst.pass");
+  assert.equal(item.params.score, "82");
+  assert.equal(item.params.measured, "5/6");
+  assert.equal(item.params.reason, "TEXT:lead.holderGrowth");
+  assert.equal(item.params.token, "JEAN");
 
-  // A coin too young to have a normal hour is quoted against its own pool instead.
-  const withTurnover = h.humanizeLog("[bot2] GREEN CATS score=0.84 (surge, 2.4x the pool traded in an hour) age=12h");
-  assert.equal(withTurnover.key, "ev.bot2.greenTurnover");
-  assert.equal(withTurnover.params.times, "2.4");
-
-  const without = h.humanizeLog("[bot2] GREEN JEAN score=0.60 (depth) age=4h");
-  assert.equal(without.key, "ev.bot2.green");
-  assert.equal(without.params.times, "");
+  // The entry line carries the size and the levels it was opened with, so a reader can tell what
+  // the trade actually risked without opening the journal.
+  const buy = h.humanizeLog("[executor] BUY JEAN $450,000 score=82 dip-and-bounce | 0.08000 SOL, stop -6%, trail 8% after +12%");
+  assert.equal(buy.key, "ev.executor.buy");
+  assert.equal(buy.params.size, "0.0800 SOL");
+  assert.equal(buy.params.stop, "6");
+  assert.equal(buy.params.after, "12");
+  assert.equal(buy.params.trigger, "dip-and-bounce");
 });
 
 test("unknown lines stay technical instead of inventing a sentence", () => {
@@ -158,8 +162,12 @@ test("label helpers fall back instead of printing a raw key", () => {
   assert.equal(h.leadText("whatever"), "whatever");
   assert.equal(h.waitingText({ waitingFor: "dip", dipPct: 0.123 }), "TEXT:waiting.dip");
   assert.equal(h.waitingText({}), "TEXT:waiting.unknown");
-  assert.equal(h.fmtScore(0.5), "0.50");
+  // The analyst's score is a whole number out of 100, not the old 0..1 score.
+  assert.equal(h.fmtScore(72), "72");
+  assert.equal(h.fmtScore(72.4), "72");
   assert.equal(h.fmtScore(null), "—");
+  assert.equal(h.measuredText({ measured: 4 }), "TEXT:frag.measured");
+  assert.equal(h.measuredText({}), "—", "a candidate with no score yet shows nothing, not 0/6");
   assert.equal(h.surgeText({ surgeFrom: "baseline", surgeRatio: 18.4 }), "TEXT:frag.times");
   assert.equal(h.surgeText({ surgeFrom: "turnover", turnover: 2.4 }), "TEXT:frag.timesPool");
   assert.equal(h.surgeText({ surgeFrom: "turnover", surgeRatio: 0.6 }), "TEXT:frag.times", "falls back to what it does know");

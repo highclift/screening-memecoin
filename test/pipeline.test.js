@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { createDevBook } from "../src/devbook.js";
 import { devReason, gateReason, holderReason, GATE_DEFAULTS } from "../src/filters.js";
+import { parseReport } from "../src/rugcheck.js";
+import { rugcheckReason } from "../src/agents/filter.js";
+import { windowReason } from "../src/agents/scout.js";
+import { deskScore, holderGrowthPerHour } from "../src/signals.js";
 import { topHolderPct, fetchHolderStats, fetchSafetyReport, isFreshWallet } from "../src/holders.js";
 import { createJournal } from "../src/journal.js";
 import { createMeter } from "../src/meter.js";
@@ -95,6 +99,38 @@ test("gates: an untradable coin is rejected whatever else it looks like", () => 
   assert.match(gateReason(tradable({ liquidityUsd: 900 }), GATE_DEFAULTS).detail, /\$900 below \$5,000/);
 });
 
+test("gates: volume made by a handful of wallets is not a market", () => {
+  // The insider pattern from the outside: the hour looks busy, but the buying is a few addresses
+  // trading with each other. Volume and trade count are free to manufacture; distinct buyers are
+  // not, so that is the number the gate is built on.
+  assert.equal(gateReason(tradable({ buyersH1: 40 }), GATE_DEFAULTS), null);
+  assert.equal(gateReason(tradable({ buyersH1: 6 }), GATE_DEFAULTS).category, "few_buyers");
+  assert.match(gateReason(tradable({ buyersH1: 6 }), GATE_DEFAULTS).detail, /6 different wallets/);
+
+  // Enough wallets to pass the count, but 300 trades between 15 of them is 20 trades each.
+  assert.equal(gateReason(tradable({ buyersH1: 15 }), GATE_DEFAULTS).category, "wash_trading");
+  assert.equal(gateReason(tradable({ buyersH1: 15, tradesH1: 120 }), GATE_DEFAULTS), null, "8 trades each is ordinary");
+
+  // Unknown stays unknown: most sources never report a buyer count, and a missing number must not
+  // reject a coin. Bot 2 refuses to call a coin GREEN until it has one (see bots/filter.js).
+  assert.equal(gateReason(tradable(), GATE_DEFAULTS), null);
+  assert.equal(gateReason(tradable({ buyersH1: null }), GATE_DEFAULTS), null);
+});
+
+test("gates: a coin more wallets are leaving than joining is being handed out", () => {
+  // Measured on the coin that prompted this: 271 wallets bought that hour and 349 sold, while the
+  // buy/sell split (507/519) looked almost even and the volume looked healthy. Counting WALLETS
+  // is what separates "busy" from "the holders are getting out".
+  const live = { marketCapUsd: 612_124, liquidityUsd: 70_748, volumeH1Usd: 47_632, tradesH1: 1_026 };
+  assert.equal(gateReason({ ...live, buyersH1: 271, sellersH1: 349 }, GATE_DEFAULTS).category, "distribution");
+  assert.match(gateReason({ ...live, buyersH1: 271, sellersH1: 349 }, GATE_DEFAULTS).detail, /349 wallets sold against 271/);
+
+  // An ordinary two-way market is not distribution: some selling into a rise is how a market works.
+  assert.equal(gateReason({ ...live, buyersH1: 271, sellersH1: 300 }, GATE_DEFAULTS), null);
+  assert.equal(gateReason({ ...live, buyersH1: 271, sellersH1: 120 }, GATE_DEFAULTS), null);
+  assert.equal(gateReason({ ...live, buyersH1: 271 }, GATE_DEFAULTS), null, "a source that does not report sellers never rejects");
+});
+
 test("gates: age is never part of the decision", () => {
   // The same numbers on a 2-minute-old coin and a 3-month-old coin get the same answer. This is
   // the whole point: bot 2 judges what a coin is doing now, not when it was born.
@@ -134,21 +170,21 @@ test("safety: a fresh wallet is one with almost no history, or a history that is
 test("safety: the rules refuse a coin the creator still controls", () => {
   const config = {
     maxTopHoldersPct: 35, topHoldersCount: 5,
-    requireMintRevoked: true, requireFreezeRevoked: true, maxFreshHoldersPct: 60,
+    requireMintRevoked: true, requireFreezeRevoked: true, maxFreshSupplyPct: 25,
   };
-  const ok = { status: "ok", topPct: 20, mintAuthority: null, freezeAuthority: null, freshPct: 0, freshHolders: 0, checkedHolders: 5 };
+  const ok = { status: "ok", topPct: 20, mintAuthority: null, freezeAuthority: null, freshSupplyPct: 0, freshHolders: 0, checkedHolders: 5 };
   assert.equal(holderReason(ok, config), null);
 
   assert.equal(holderReason({ ...ok, mintAuthority: "Dev111" }, config).category, "mint_authority");
   assert.equal(holderReason({ ...ok, freezeAuthority: "Dev111" }, config).category, "freeze_authority");
   assert.equal(holderReason({ ...ok, topPct: 61 }, config).category, "holders");
-  assert.equal(holderReason({ ...ok, freshHolders: 4, checkedHolders: 5, freshPct: 80 }, config).category, "fresh_wallets");
+  assert.equal(holderReason({ ...ok, freshHolders: 2, checkedHolders: 5, freshSupplyPct: 40 }, config).category, "fresh_wallets");
 
   // Switched off, or not enough data, means no opinion — never a rejection.
   assert.equal(holderReason({ ...ok, mintAuthority: "Dev111" }, { ...config, requireMintRevoked: false }), null);
-  assert.equal(holderReason({ ...ok, freshHolders: 1, checkedHolders: 1, freshPct: 100 }, config), null, "one holder is not a pattern");
+  assert.equal(holderReason({ ...ok, freshHolders: 5, checkedHolders: 5, freshSupplyPct: 1.1 }, config), null, "five new wallets holding 1% between them are harmless");
   assert.equal(holderReason({ status: "pending" }, config), null);
-  assert.equal(holderReason({ ...ok, topPct: null, freshPct: null }, config), null);
+  assert.equal(holderReason({ ...ok, topPct: null, freshSupplyPct: null }, config), null);
 });
 
 test("safety: the full report reads authorities, concentration and holder wallets off the chain", async () => {
@@ -198,7 +234,7 @@ test("safety: the full report reads authorities, concentration and holder wallet
   assert.equal(report.topPct, 20, "150M + 50M of 1B; the pool vault is not a holder");
   assert.equal(report.checkedHolders, 2);
   assert.equal(report.freshHolders, 1);
-  assert.equal(report.freshPct, 50);
+  assert.equal(report.freshSupplyPct, 15, 'wallet1 holds 15% and is the fresh one');
   assert.deepEqual(report.holders.map((h) => h.owner), ["wallet1", "wallet2"]);
   assert.ok(calls.includes("getAccountInfo") && calls.includes("getMultipleAccounts"));
   assert.equal(calls.filter((m) => m === "getSignaturesForAddress").length, 2, "one call per holder, no more");
@@ -232,9 +268,135 @@ test("safety: a whale holding nearly everything is not mistaken for the pool", a
   assert.ok(report.topPct > 99, `the whale is counted: topPct ${report.topPct}`);
   assert.ok(report.largestHolderPct > 98);
   const verdict = holderReason({ status: "ok", ...report }, {
-    maxTopHoldersPct: 35, topHoldersCount: 5, requireMintRevoked: false, requireFreezeRevoked: false, maxFreshHoldersPct: 60,
+    maxTopHoldersPct: 35, topHoldersCount: 5, requireMintRevoked: false, requireFreezeRevoked: false, maxFreshSupplyPct: 25,
   });
   assert.equal(verdict.category, "holders", "and the coin is refused");
+});
+
+test("safety: top holders funded by one wallet are treated as a single holder", async () => {
+  // The bubble-map case: four holders of 15% each look harmless one at a time, but one wallet
+  // paid to create all four, so 60% can be dumped in a single decision.
+  const now = Date.parse("2026-11-11T12:00:00Z");
+  const recent = Math.floor(now / 1000) - 1800;
+  const fetchImpl = async (_url, init) => {
+    const { method, params } = JSON.parse(init.body);
+    const reply = (result) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    if (method === "getAccountInfo") return reply({ value: { data: { parsed: { info: {} } } } });
+    if (method === "getTokenSupply") return reply({ value: { uiAmountString: "1000" } });
+    if (method === "getTokenLargestAccounts") {
+      return reply({ value: [
+        { address: "pool", uiAmountString: "380" },
+        ...[1, 2, 3, 4].map((i) => ({ address: `acc${i}`, uiAmountString: "150" })),
+      ] });
+    }
+    if (method === "getMultipleAccounts") {
+      // First call asks about token accounts, second about the owners behind them.
+      if (!String(params[0][0]).endsWith("Owner")) {
+        return reply({ value: params[0].map((a) => ({ data: { parsed: { info: { owner: `${a}Owner` } } } })) });
+      }
+      return reply({ value: params[0].map((owner) => ({
+        owner: owner === "poolOwner" ? "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8" : "11111111111111111111111111111111",
+      })) });
+    }
+    if (method === "getSignaturesForAddress") {
+      return reply([{ signature: `sig-${params[0]}`, blockTime: recent }]); // all brand new
+    }
+    if (method === "getTransaction") {
+      // Every one of these wallets had its first transaction paid for by the same address.
+      return reply({ transaction: { message: { accountKeys: [{ pubkey: "theHub" }, { pubkey: "whoever" }] } } });
+    }
+    throw new Error(`unexpected ${method}`);
+  };
+
+  const report = await fetchSafetyReport(MINT, "https://rpc.example.com", { topCount: 5, fetchImpl, now });
+  assert.equal(report.largestClusterWallets, 4, "all four share a funder");
+  assert.ok(Math.abs(report.largestClusterPct - 60) < 0.01, `cluster holds ${report.largestClusterPct}%`);
+
+  const verdict = holderReason({ status: "ok", ...report }, {
+    maxTopHoldersPct: 100, topHoldersCount: 5, requireMintRevoked: false, requireFreezeRevoked: false,
+    maxFreshSupplyPct: 100, maxClusterPct: 50,
+  });
+  assert.equal(verdict.category, "wallet_cluster", "refused even though no single holder is large");
+
+  // A wallet that paid its own first fee tells us nothing, so it forms no cluster.
+  const alone = await fetchSafetyReport(MINT, "https://rpc.example.com", {
+    topCount: 5, now,
+    fetchImpl: async (url, init) => {
+      const { method, params } = JSON.parse(init.body);
+      if (method !== "getTransaction") return fetchImpl(url, init);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1,
+        result: { transaction: { message: { accountKeys: [{ pubkey: `${params[0].replace("sig-", "")}` }] } } } }));
+    },
+  });
+  assert.equal(alone.largestClusterPct, null, "no funder, no cluster");
+});
+
+test("safety: twenty small wallets paid for by one address are caught, though no holder is big", async () => {
+  // The bubble map this was built for: a dense ring of wallets around one hub, none of them large
+  // enough to trip a top-holder limit. 20 wallets at 1.5% is 30% of supply under one hand, and the
+  // top-5 concentration check sees only 7.5% of it. The hub here is itself a holder — the middle
+  // of the map — so it has to be counted as part of its own cluster.
+  const now = Date.parse("2026-11-11T12:00:00Z");
+  const first = Math.floor(now / 1000) - 7200;
+  const accounts = Array.from({ length: 20 }, (_, i) => `acc${i + 1}`);
+  const fundedAt = (owner) => first + accounts.indexOf(owner.replace("Owner", "")) * 300; // ~1.6h apart
+
+  const fetchImpl = async (_url, init) => {
+    const { method, params } = JSON.parse(init.body);
+    const reply = (result) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    if (method === "getAccountInfo") return reply({ value: { data: { parsed: { info: {} } } } });
+    if (method === "getTokenSupply") return reply({ value: { uiAmountString: "1000" } });
+    if (method === "getTokenLargestAccounts") {
+      return reply({ value: [
+        { address: "pool", uiAmountString: "700" },
+        ...accounts.map((address) => ({ address, uiAmountString: "15" })), // 1.5% each
+      ] });
+    }
+    if (method === "getMultipleAccounts") {
+      if (!String(params[0][0]).endsWith("Owner")) {
+        return reply({ value: params[0].map((a) => ({ data: { parsed: { info: { owner: `${a}Owner` } } } })) });
+      }
+      return reply({ value: params[0].map((owner) => ({
+        owner: owner === "poolOwner" ? "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8" : "11111111111111111111111111111111",
+      })) });
+    }
+    if (method === "getSignaturesForAddress") {
+      return reply([{ signature: `sig-${params[0]}`, blockTime: fundedAt(params[0]) }]);
+    }
+    if (method === "getTransaction") {
+      // acc1Owner paid for all the others, and for nothing but its own first fee itself.
+      const owner = params[0].replace("sig-", "");
+      return reply({ transaction: { message: { accountKeys: [{ pubkey: owner === "acc1Owner" ? owner : "acc1Owner" }] } } });
+    }
+    throw new Error(`unexpected ${method}`);
+  };
+
+  const report = await fetchSafetyReport(MINT, "https://rpc.example.com", {
+    topCount: 5, clusterHolderCount: 20, fetchImpl, now,
+  });
+  assert.equal(report.topPct, 7.5, "the top-5 check only ever sees 7.5% — this is why it missed");
+  assert.equal(report.largestClusterWallets, 20, "the hub counts inside its own cluster, once");
+  assert.ok(Math.abs(report.largestClusterPct - 30) < 0.01, `cluster holds ${report.largestClusterPct}%`);
+  assert.ok(report.largestClusterSpanHours < 2, "all funded inside two hours: a setup, not a coincidence");
+  assert.ok(Math.abs(report.linkedSupplyPct - 30) < 0.01);
+
+  const config = {
+    maxTopHoldersPct: 35, topHoldersCount: 5, requireMintRevoked: false, requireFreezeRevoked: false,
+    maxFreshSupplyPct: 100, maxClusterPct: 15, maxLinkedSupplyPct: 25, maxClusterWallets: 3, clusterBurstHours: 72,
+  };
+  assert.equal(holderReason({ status: "ok", ...report }, config).category, "wallet_cluster");
+
+  // Even with the size limits switched off, twenty wallets from one payer is refused on the count.
+  const sizeBlind = { ...config, maxClusterPct: 100, maxLinkedSupplyPct: 100 };
+  assert.equal(holderReason({ status: "ok", ...report }, sizeBlind).category, "linked_wallets");
+  assert.equal(holderReason({ status: "ok", ...report, largestClusterPct: 20, linkedSupplyPct: 40 },
+    { ...config, maxClusterPct: 100 }).category, "linked_supply", "several hubs add up");
+
+  // The guard against false positives: an address that funded these wallets months apart is an
+  // exchange hot wallet that strangers happen to share, not somebody building a position.
+  assert.equal(holderReason({ status: "ok", ...report, largestClusterSpanHours: 5000 }, sizeBlind), null);
+  assert.equal(holderReason({ status: "ok", ...report, largestClusterWallets: 2 }, sizeBlind), null,
+    "two wallets is under the count limit");
 });
 
 test("safety: a wallet lookup that fails does not condemn the coin", async () => {
@@ -253,7 +415,7 @@ test("safety: a wallet lookup that fails does not condemn the coin", async () =>
   const report = await fetchSafetyReport(MINT, "https://rpc.example.com", { fetchImpl });
   assert.equal(report.holders[0].fresh, null, "unknown, not fresh");
   assert.equal(report.checkedHolders, 0);
-  assert.equal(report.freshPct, null, "and so no fresh-wallet rule applies");
+  assert.equal(report.freshSupplyPct, null, "and so no fresh-wallet rule applies");
 });
 
 test("holders: skips the largest account (pool) by default and counts the next N", () => {
@@ -366,23 +528,162 @@ test("meter: counts only the last minute", () => {
   assert.equal(meter.perMinute(start + 61_000), 0, "a minute later those hits no longer count");
 });
 
-test("config: money limits and safety floors have safe defaults and are validated", () => {
+test("rugcheck: the report is read the way the live API actually shapes it", () => {
+  // Trimmed from a real api.rugcheck.xyz response. The shapes that matter: amounts are raw and
+  // have to be divided by `token.supply`, and a coin trades in SEVERAL markets whose LP numbers
+  // disagree — eight pools here, one of them holding almost all the liquidity.
+  const report = parseReport({
+    token: { supply: 1_000_000_000, decimals: 6, mintAuthority: null, freezeAuthority: "Frz1" },
+    creator: "DoXSiJr1",
+    creatorBalance: 25_000_000, // 2.5%
+    totalMarketLiquidity: 106_122,
+    totalHolders: 9_284,
+    rugged: false,
+    score_normalised: 1,
+    launchpad: { platform: "pump_fun" },
+    markets: [
+      { marketType: "meteoraDlmm", lp: { quoteUSD: 23_068, lpLockedPct: 0, lpLockedUSD: 0 } },
+      { marketType: "pump_fun_amm", lp: { quoteUSD: 36_959, lpLockedPct: 100, lpLockedUSD: 75_367 } },
+      { marketType: "orca", lp: { quoteUSD: 5, lpLockedPct: 0, lpLockedUSD: 0 } },
+    ],
+    insiderNetworks: [
+      { size: 6, type: "transfer", tokenAmount: 90_000_000, currentHolding: 60_000_000, activeAccounts: 6 },
+      { size: 3, type: "transfer", tokenAmount: 20_000_000, currentHolding: 10_000_000, activeAccounts: 3 },
+    ],
+    topHolders: [{ pct: 5.6, insider: false }, { pct: 4.3, insider: true }],
+  });
+
+  // The deepest pool is the one a position would be sold into, so that is the LP number that
+  // counts — not an average that a dust pool at 0% would drag down.
+  assert.equal(report.lpLockedPct, 100);
+  assert.equal(report.marketType, "pump_fun_amm");
+  assert.equal(report.marketCount, 3);
+  assert.equal(report.creatorPct, 2.5);
+  assert.equal(report.freezeAuthority, "Frz1");
+  // Both insider networks together, measured on what they STILL hold.
+  assert.ok(Math.abs(report.insiderPct - 7) < 1e-9, `insiders hold ${report.insiderPct}%`);
+  assert.ok(Math.abs(report.insiderEverPct - 11) < 1e-9);
+  assert.equal(report.insiderWallets, 9);
+  assert.equal(report.flaggedHolderPct, 4.3);
+  assert.equal(report.totalHolders, 9_284);
+
+  assert.equal(parseReport(null), null);
+  // A token with no markets and no supply yet must not come back with invented zeroes.
+  const bare = parseReport({ token: {}, markets: [] });
+  assert.equal(bare.lpLockedPct, null);
+  assert.equal(bare.creatorPct, null);
+  assert.equal(bare.insiderPct, null);
+});
+
+test("rugcheck rules: the kill list from the spec, and unknown never kills", () => {
+  const config = {
+    requireMintRevoked: true, requireFreezeRevoked: true,
+    minLpLockedPct: 90, maxDevPct: 3, maxBundledPct: 10,
+  };
+  const ok = {
+    mintAuthority: null, freezeAuthority: null, lpLockedPct: 100, creatorPct: 1,
+    insiderPct: 2, flaggedHolderPct: 1, rugged: false, marketType: "pump_fun_amm",
+  };
+  assert.equal(rugcheckReason(ok, config), null);
+
+  assert.equal(rugcheckReason({ ...ok, rugged: true }, config).category, "rugged");
+  assert.equal(rugcheckReason({ ...ok, mintAuthority: "Dev1" }, config).category, "mint_authority");
+  assert.equal(rugcheckReason({ ...ok, freezeAuthority: "Dev1" }, config).category, "freeze_authority");
+  assert.equal(rugcheckReason({ ...ok, lpLockedPct: 50 }, config).category, "lp_unlocked");
+  assert.equal(rugcheckReason({ ...ok, creatorPct: 9 }, config).category, "dev_holding");
+  assert.equal(rugcheckReason({ ...ok, insiderPct: 14 }, config).category, "bundled");
+  assert.equal(rugcheckReason({ ...ok, flaggedHolderPct: 25 }, config).category, "bundled");
+  assert.match(rugcheckReason({ ...ok, lpLockedPct: 50 }, config).detail, /50\.0% of the pump_fun_amm pool/);
+
+  // A field the API did not fill in is not a reason to refuse a coin — the filter keeps it in
+  // `wait` instead, which is a different thing from passing it.
+  assert.equal(rugcheckReason({ ...ok, lpLockedPct: null, creatorPct: null, insiderPct: null, flaggedHolderPct: null }, config), null);
+  assert.equal(rugcheckReason(null, config), null);
+});
+
+test("desk score: six parts out of 100, and unknown parts stay neutral", () => {
+  const strong = {
+    priceChangeH1: 35, buyersH1: 120, sellersH1: 40, buysH1: 300, sellsH1: 100, tradesH1: 400,
+    liquidityUsd: 60_000, marketCapUsd: 500_000,
+    holderCounts: [{ at: 0, holders: 500 }, { at: 30 * 60_000, holders: 600 }],
+  };
+  const hot = deskScore(strong, { smartCrowd: { score: 0.9, known: 6 } });
+  assert.ok(hot.score >= 80, `a coin doing everything right scored ${hot.score}`);
+  assert.equal(hot.measured, 6, "all six parts measured");
+  assert.equal(hot.of, 6);
+
+  const weak = deskScore({
+    priceChangeH1: -4, buyersH1: 8, sellersH1: 30, buysH1: 20, sellsH1: 80, tradesH1: 100,
+    liquidityUsd: 6_000, marketCapUsd: 500_000,
+  });
+  assert.ok(weak.score < 40, `a coin doing everything wrong scored ${weak.score}`);
+
+  // Nothing known at all: every part falls back to neutral, which lands at 50 — comfortably under
+  // the pass mark, so an unmeasured coin is never bought on a shrug.
+  const blank = deskScore({});
+  assert.equal(blank.score, 50);
+  assert.equal(blank.measured, 0);
+  assert.equal(blank.parts.smartWallets, 0.5);
+
+  // Holder growth needs two samples far enough apart to be a rate rather than a number.
+  assert.equal(holderGrowthPerHour([{ at: 0, holders: 100 }]), null);
+  assert.equal(holderGrowthPerHour([{ at: 0, holders: 100 }, { at: 1000, holders: 150 }]), null, "1s apart is not a rate");
+  assert.equal(holderGrowthPerHour([{ at: 0, holders: 100 }, { at: 3_600_000, holders: 150 }]), 0.5);
+
+  // The lead is only ever a part we actually measured, so the log line cannot credit a guess.
+  const onlyDepth = deskScore({ liquidityUsd: 60_000, marketCapUsd: 500_000 });
+  assert.equal(onlyDepth.lead, "liqMcap");
+});
+
+test("scout window: the age and size band, and missing data waits rather than kills", () => {
+  const window = { minAgeSeconds: 1800, maxAgeSeconds: 259_200, minMarketCapUsd: 300_000, maxMarketCapUsd: 20_000_000 };
+  const coin = { marketCapUsd: 1_000_000 };
+
+  assert.equal(windowReason(coin, window, 7200), null);
+  assert.equal(windowReason(coin, window, 600).category, "too_young");
+  assert.equal(windowReason(coin, window, 10 * 86_400).category, "too_old");
+  assert.equal(windowReason({ marketCapUsd: 50_000 }, window, 7200).category, "mcap_low");
+  assert.equal(windowReason({ marketCapUsd: 90_000_000 }, window, 7200).category, "mcap_high");
+
+  // A coin whose age or size has not been filled in yet is simply not handed on this round. It is
+  // not a kill, because next refresh it may be both known and inside the window.
+  assert.equal(windowReason(coin, window, null).wait, true);
+  assert.equal(windowReason({}, window, 7200).wait, true);
+});
+
+test("config: the desk's window, kill list and trade shape have safe defaults and are validated", () => {
   const c = loadConfig({});
   assert.equal(c.mode, "paper");
   assert.equal(c.solanaRpcUrl, "");
   assert.equal(c.topHoldersSkipLargest, true);
-  assert.equal(c.greenScore, 0.58);
-  assert.equal(c.gates.minLiquidityUsd, GATE_DEFAULTS.minLiquidityUsd);
-  // There are no entry/exit settings any more: bot 3 derives those per coin.
-  for (const gone of ["pullbackPct", "bouncePct", "takeProfitPct", "stopLossPct", "maxHoldSeconds", "minScore", "lanes"]) {
+
+  // The spec of the desk, in numbers.
+  assert.equal(c.window.minAgeSeconds, 30 * 60);
+  assert.equal(c.window.maxAgeSeconds, 72 * 3600);
+  assert.equal(c.window.minMarketCapUsd, 300_000);
+  assert.equal(c.window.maxMarketCapUsd, 20_000_000);
+  assert.equal(c.gates.minLiquidityUsd, 25_000);
+  assert.equal(c.minLpLockedPct, 90);
+  assert.equal(c.maxDevPct, 3);
+  assert.equal(c.maxBundledPct, 10);
+  assert.equal(c.maxPriceChangeH1, 80);
+  assert.equal(c.passScore, 70);
+  assert.equal(c.positionPct, 0.08);
+  assert.equal(c.stopPct, 0.06);
+  assert.equal(c.trailAfterPct, 0.12);
+
+  // Position size is a share of the balance now; a fixed per-trade amount is not a setting.
+  for (const gone of ["buyAmountSol", "greenScore", "watchScore", "pullbackPct", "takeProfitPct", "minScore", "lanes"]) {
     assert.equal(c[gone], undefined, `${gone} must not come back as a setting`);
   }
 
   assert.throws(() => loadConfig({ MODE: "live" }), /paper/);
   assert.throws(() => loadConfig({ SOLANA_RPC_URL: "ftp://nope" }), /SOLANA_RPC_URL/);
   assert.throws(() => loadConfig({ TOP_HOLDERS_SKIP_LARGEST: "maybe" }), /true or false/);
-  assert.throws(() => loadConfig({ BUY_AMOUNT_SOL: "5", PAPER_START_BALANCE_SOL: "1" }), /BUY_AMOUNT_SOL/);
   assert.throws(() => loadConfig({ MIN_MARKET_CAP_USD: "100000", MAX_MARKET_CAP_USD: "50000" }), /MIN_MARKET_CAP_USD/);
-  assert.throws(() => loadConfig({ WATCH_SCORE: "0.9", GREEN_SCORE: "0.5" }), /WATCH_SCORE/);
-  assert.equal(loadConfig({ GREEN_SCORE: "0.7" }).greenScore, 0.7);
+  assert.throws(() => loadConfig({ MIN_AGE_MINUTES: "4320", MAX_AGE_HOURS: "1" }), /MIN_AGE_MINUTES/);
+  // A trail that arms below the stop would mean the stop can never fire: refuse to start.
+  assert.throws(() => loadConfig({ STOP_PCT: "0.2", TRAIL_AFTER_PCT: "0.1" }), /TRAIL_AFTER_PCT/);
+  assert.equal(loadConfig({ PASS_SCORE: "85" }).passScore, 85);
+  assert.equal(loadConfig({ POSITION_PCT: "0.05" }).positionPct, 0.05);
 });

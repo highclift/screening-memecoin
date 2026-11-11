@@ -1,34 +1,48 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { createUniverse } from "./universe.js";
 import { createJournal } from "./journal.js";
 import { createDevBook } from "./devbook.js";
 import { createFeed } from "./feed.js";
-import { createScreener } from "./bots/screener.js";
-import { createFilter } from "./bots/filter.js";
-import { createExecutor } from "./bots/executor.js";
+import { createRugcheck } from "./rugcheck.js";
+import { createSmartWallets } from "./smartwallets.js";
+import { createLogger } from "./agents/logger.js";
+import { createScout } from "./agents/scout.js";
+import { createFilter } from "./agents/filter.js";
+import { createAnalyst } from "./agents/analyst.js";
+import { createRisk } from "./agents/risk.js";
+import { createExecutor } from "./agents/executor.js";
 import { currentUtcDay, loadState, saveState } from "./state.js";
 
-// Three bots in a chain, in one process so they share one API budget and one copy of the data:
+// SIX AGENTS, ONE PROCESS, HARD HANDOFFS.
 //
-//   bot 1 screens every coin at any age      ->  data/bot1-screened.jsonl
-//   bot 2 judges everything bot 1 screened   ->  data/bot2-filtered.jsonl
-//   bot 3 buys and sells what bot 2 greenlit ->  data/bot3-trades.jsonl
+//   scout     finds coins and keeps only what is inside the age / market-cap window
+//     -> filter    kills anything unsafe: authorities, LP, liquidity, dev bag, bundled wallets
+//       -> analyst scores what is left out of 100; only PASS_SCORE and above goes on
+//         -> executor times the entry and is the only agent that touches a position
+//           <-> risk decides the size, whether a trade is allowed, and when it ends
+//   logger    every stage reports here, and every kill is written down with its reason
 //
-// The handoff is one function call per stage (onScreened -> consider -> watch -> onData), so each
-// bot only ever sees the stage before it. Paper only: nothing here signs or sends a transaction.
+// Each handoff is one function call, so an agent only ever sees the stage before it. A coin cannot
+// skip a stage, and a coin that fails one is never seen by the next.
+//
+// They share one process so they share one API budget and one copy of the data. Paper only:
+// nothing here signs or sends a transaction.
 
 let config = loadConfig();
 const account = loadState(config.paperStartBalanceSol);
 const universe = createUniverse({ maxTokens: config.maxUniverseTokens });
 const devBook = createDevBook();
+const smartWallets = createSmartWallets();
+const rugcheck = createRugcheck({ callsPerMinute: config.rugcheckCallsPerMinute });
 
 const journals = {
-  screener: createJournal({ filePath: path.resolve("data", "bot1-screened.jsonl"), maxBytes: 20 * 1024 * 1024 }),
-  filter: createJournal({ filePath: path.resolve("data", "bot2-filtered.jsonl"), maxBytes: 10 * 1024 * 1024 }),
-  executor: createJournal({ filePath: path.resolve("data", "bot3-trades.jsonl") }),
+  scout: createJournal({ filePath: path.resolve("data", "scout.jsonl"), maxBytes: 20 * 1024 * 1024 }),
+  kills: createJournal({ filePath: path.resolve("data", "kills.jsonl"), maxBytes: 20 * 1024 * 1024 }),
+  trades: createJournal({ filePath: path.resolve("data", "trades.jsonl") }),
 };
 
 let stopping = false;
@@ -36,7 +50,7 @@ let feedConnected = false;
 let statusTimer;
 let sweepTimer;
 let saveTimer;
-let devBookTimer;
+let bookTimer;
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -56,67 +70,80 @@ function persist() {
   saveState(account);
 }
 
+const logger = createLogger({ journals, maxTracked: config.maxUniverseTokens, log, note });
+
 const feed = createFeed({
   config,
   log,
-  onLaunch: (event) => screener.onLaunch(event),
-  onMigration: (event) => screener.onMigration(event),
+  onLaunch: (event) => scout.onLaunch(event),
+  onMigration: (event) => scout.onMigration(event),
   onConnectionChange: (connected) => {
     feedConnected = connected;
     if (process.send) process.send({ type: "feed", connected, source: "pumpportal" });
   },
 });
 
-// Declared in reverse order of the chain so each bot can be handed the one after it.
+// Declared in reverse order of the chain, so each agent can be handed the one after it.
+const risk = createRisk({ config, account, logger, persist });
+
 const executor = createExecutor({
   config,
   universe,
-  journal: journals.executor,
   account,
+  risk,
+  logger,
   persist,
   solUsd: () => feed.solUsd(),
-  isGreen: (mint) => filter.isGreen(mint),
+  isCandidate: (mint) => analyst.passes(mint),
   // A position that collapsed while held: ban the coin for good and count it against its creator.
   onRug: (mint, detail) => {
     if (!devBook.recordRug(mint)) return;
-    journals.filter.write({ type: "rug", mint, source: "held-position", ...detail });
-    log(`[bot2] ${mint.slice(0, 8)} collapsed while held; banned from now on (${devBook.bannedCount()} banned).`);
+    journals.kills.write({ type: "rug", stage: "executor", mint, ...detail });
+    log(`[filter] ${mint.slice(0, 8)} collapsed while held; banned from now on (${devBook.bannedCount()} banned).`);
   },
-  log,
-  note,
 });
 
-const filter = createFilter({
+const analyst = createAnalyst({
   config,
   universe,
-  journal: journals.filter,
-  devBook,
-  log,
-  note,
-  onGreen: (record) => executor.watch(record),
+  feed,
+  smartWallets,
+  logger,
+  onPassed: (record) => executor.watch(record),
   onDropped: (mint, why) => {
     if (!executor.holds(mint)) executor.unwatch(mint, why);
   },
 });
 
-const screener = createScreener({
+const filter = createFilter({
+  config,
+  universe,
+  devBook,
+  rugcheck,
+  logger,
+  onPassed: (record, meta) => analyst.consider(record, meta),
+  onKilled: (mint, why) => {
+    analyst.withdraw(mint, why);
+    if (!executor.holds(mint)) executor.unwatch(mint, why);
+  },
+});
+
+const scout = createScout({
   config,
   universe,
   feed,
-  journal: journals.screener,
+  logger,
   devBook,
   log,
   note,
-  onScreened: (record, meta) => {
-    // bot 1 -> bot 2 -> bot 3, in that order: bot 3 must see this round's verdict, not the last one.
+  onScouted: (record, meta) => {
+    // scout -> filter -> analyst -> executor, in that order: the executor must see this round's
+    // verdict, not the last one.
     filter.consider(record, meta);
     executor.onData(record, meta.now);
   },
 });
 
-// The fourth row on the dashboard: everything the three bots write down. One line per journal
-// plus the paper account, so a disk that fills up or a write that fails is visible rather than
-// silent.
 function storageStatus() {
   const files = Object.entries(journals).map(([name, journal]) => ({ name, ...journal.stats() }));
   let accountBytes = 0;
@@ -140,10 +167,12 @@ function publishStatus() {
     type: "screener-status",
     status: {
       bots: {
-        screener: screener.status(),
+        scout: scout.status(),
         filter: filter.status(),
+        analyst: analyst.status(),
         executor: executor.status(),
-        storage: storageStatus(),
+        risk: risk.status(),
+        logger: { ...logger.status(), ...storageStatus() },
       },
       holderCheck: Boolean(config.solanaRpcUrl),
       updatedAt: new Date().toISOString(),
@@ -157,21 +186,59 @@ function shutdown() {
   clearInterval(statusTimer);
   clearInterval(sweepTimer);
   clearInterval(saveTimer);
-  clearInterval(devBookTimer);
-  screener.stop();
+  clearInterval(bookTimer);
+  scout.stop();
   feed.stop();
   persist();
   devBook.save();
+  smartWallets.save();
   for (const journal of Object.values(journals)) journal.stop();
-  log("[shutdown] Paper account saved; all three bots stopped.");
+  log("[shutdown] Paper account saved; all six agents stopped.");
   if (process.connected) process.disconnect();
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+// Importing this file must never start a desk.
+//
+// Everything above only builds objects; nothing connects, writes or ticks until start() runs, and
+// start() runs only when this file was launched as a program (`npm run bot`, or the fork from
+// server.js). A plain `import()` of it — from a test, a tooling script, an editor's auto-import —
+// used to launch a full second desk against the same data/ directory as the one already running.
+// Two desks stamping the same paper account over each other is almost impossible to recognise from
+// the dashboard: the numbers simply flip between two different accounts every few seconds.
+const isMain = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
-// The dashboard can only change money limits now; there are no strategy settings left to send.
-process.on("message", (message) => {
+function start() {
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("message", onParentMessage);
+
+  if (account.daily?.day !== currentUtcDay()) {
+    account.daily = { day: currentUtcDay(), entries: 0, realizedPnlSol: 0 };
+  }
+
+  const w = config.window;
+  log(`[start] mode=${config.mode} paper balance=${account.balanceSol.toFixed(5)} SOL, ${Math.round(config.positionPct * 100)}% per trade (${risk.sizeSol().toFixed(5)} SOL now), max ${config.maxOpenPositions} open, max ${config.maxEntriesPerDay} entries/day, daily loss limit ${config.maxDailyLossSol} SOL.`);
+  log("[desk] scout -> filter -> analyst -> executor <-> risk, and every kill goes to the logger.");
+  log(`[desk] window ${Math.round(w.minAgeSeconds / 60)}m-${Math.round(w.maxAgeSeconds / 3600)}h old, $${Math.round(w.minMarketCapUsd / 1000)}k-$${Math.round(w.maxMarketCapUsd / 1_000_000)}M | pass mark ${config.passScore}/100 | stop -${Math.round(config.stopPct * 100)}%, trail ${Math.round(config.trailPct * 100)}% once +${Math.round(config.trailAfterPct * 100)}%.`);
+  log(`[desk] safety: LP >= ${config.minLpLockedPct}% burned/locked, dev <= ${config.maxDevPct}%, bundled <= ${config.maxBundledPct}%, liquidity >= $${Math.round(config.gates.minLiquidityUsd / 1000)}k; holder graph ${config.solanaRpcUrl ? "ON" : "OFF (set SOLANA_RPC_URL)"}.`);
+
+  for (const journal of Object.values(journals)) journal.start();
+  bookTimer = setInterval(() => {
+    devBook.save();
+    smartWallets.save();
+  }, 60_000);
+  feed.start();
+  scout.start();
+  sweepTimer = setInterval(() => {
+    executor.sweep();
+    scout.prioritize(executor.priorityMints());
+  }, 2000);
+  saveTimer = setInterval(persist, 15_000);
+  statusTimer = setInterval(publishStatus, 1000);
+  if (process.send) process.send({ type: "status", status: "running" });
+}
+
+function onParentMessage(message) {
   if (!message || typeof message !== "object") return;
 
   // The dashboard's emergency exit: close one coin, or everything.
@@ -190,24 +257,6 @@ process.on("message", (message) => {
     log(`[settings error] ${error.message}`);
     if (process.send) process.send({ type: "settings-error", error: error.message });
   }
-});
-
-if (account.daily?.day !== currentUtcDay()) {
-  account.daily = { day: currentUtcDay(), entries: 0, realizedPnlSol: 0 };
 }
 
-log(`[start] mode=${config.mode} paper balance=${account.balanceSol.toFixed(5)} SOL, ${config.buyAmountSol} SOL per trade, max ${config.maxOpenPositions} open, max ${config.maxEntriesPerDay} entries/day, daily loss limit ${config.maxDailyLossSol} SOL.`);
-log("[pipeline] bot 1 screens every coin (any age) -> bot 2 judges can-it-pump -> bot 3 times entry and exit. No strategy settings: bot 3 measures each coin and sets its own stops.");
-log(`[pipeline] bot 2 turns a coin green at score ${config.greenScore}; holder check ${config.solanaRpcUrl ? "ON" : "OFF (set SOLANA_RPC_URL)"}; dev history max ${config.maxDevRugs} rug / ${config.maxDevLaunches} launches.`);
-
-for (const journal of Object.values(journals)) journal.start();
-devBookTimer = setInterval(() => devBook.save(), 60_000);
-feed.start();
-screener.start();
-sweepTimer = setInterval(() => {
-  executor.sweep();
-  screener.prioritize(executor.priorityMints());
-}, 2000);
-saveTimer = setInterval(persist, 15_000);
-statusTimer = setInterval(publishStatus, 1000);
-if (process.send) process.send({ type: "status", status: "running" });
+if (isMain) start();

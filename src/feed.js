@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import WebSocket from "ws";
 import { createBudget, fetchGeckoPools, fetchGeckoPoolsMulti, parseGeckoPool } from "./discovery.js";
-import { fetchDexSnapshots, fetchSolUsdPrice } from "./pricefeed.js";
+import { fetchDexSnapshots, fetchSolUsdPrice, fetchUniqueBuyers } from "./pricefeed.js";
 
 const WS_BASE = process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data";
 const COLD_START_RATE = 8; // what to try before anything is known about this network
@@ -242,6 +242,22 @@ export function createFeed({
         if (error.rateLimited) geckoRateLimited();
         else errorLog(`[feed] GeckoTerminal pool refresh failed: ${error.message}`);
         return [];
+      }
+    },
+
+    // The wallet addresses that bought in one pool recently. One call for one pool, so it is only
+    // worth spending on a coin the analyst is actually scoring — it is what the smart-wallet
+    // registry learns from, and the only place the desk sees WHO is buying rather than how many.
+    async buyers(poolAddress, sinceMs = 0) {
+      if (!poolAddress || Date.now() < geckoBackoffUntil || !budget.tryTake()) return null;
+      try {
+        const result = await fetchUniqueBuyers(poolAddress, sinceMs);
+        geckoWorked();
+        return result;
+      } catch (error) {
+        if (error.rateLimited) geckoRateLimited();
+        else errorLog(`[feed] GeckoTerminal trades for ${poolAddress.slice(0, 8)} failed: ${error.message}`);
+        return null;
       }
     },
 
