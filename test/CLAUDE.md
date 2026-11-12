@@ -12,17 +12,21 @@
   to FDV, DexScreener reports `marketCap` falling back to FDV, and for the same coin those differ by
   up to 10x. `src/universe.js` keeps one source per coin (DexScreener wins) and bumps
   `marketCapEpoch` when it changes so the executor re-measures instead of trading an imaginary crash.
-- Dashboard JS must use `textContent` / DOM APIs, never `innerHTML` with coin names (they are untrusted).
-  The one `innerHTML` path is `data-i18n-html` in `public/i18n.js`, which only ever renders dictionary
-  strings. Never route coin names, log text or API errors through it.
-- No raw colour in `styles.css` outside the two `:root` token blocks, and every token the dark
-  theme defines must be redefined by the light one. Elevation differs by theme on purpose: dark
-  raises a surface by making it LIGHTER (--surface-1/2/3 climb), light keeps everything white and
-  raises it with --shadow-1/2. --good is lime TEXT, --good-fill is the lime BUTTON FILL (on white
-  they must differ, or the text is unreadable). test/i18n.test.js checks contrast in both themes.
-- No user-visible string is hard-coded in `public/`: add a key to both `id` and `en` in
-  `public/i18n.js` and render it with `t()` (or `tn()` when a count needs singular/plural).
-  `test/i18n.test.js` enforces parity and that every key referenced actually exists.
+- Dashboard JS must use `textContent` / DOM APIs, never `innerHTML` with coin names (they are
+  untrusted). The only `innerHTML` in `public/app.js` assigns the constant SVG path data in `ICONS`
+  and `GEAR`, which interpolate nothing. Never route coin names, log text or API errors through it.
+- No raw colour in `styles.css` outside the `:root` token block. The desk is dark-only; a colour
+  written anywhere else is one that stops following the theme. Status colours (`--good`,
+  `--critical`, `--warning`, `--info`) carry meaning — a P&L sign, a kill, a halt — and are never
+  used for decoration. The chart is a single series, so it gets the one brand hue `--series-1`.
+- The dashboard is English only. There is no i18n layer: strings are written where they are
+  rendered. The worker's own log and `tell()` lines are shown verbatim in the activity log, so they
+  are written in English too.
+- What the dashboard may change lives in `src/settings.js`, grouped by the agent that READS it
+  (that is what each gear icon on the rail opens). It holds no defaults — every default and every
+  range check stays in `src/config.js`, and a field only says where its value lives and what units
+  to show it in. `test/settings.test.js` round-trips every field to catch a wrong scale, and checks
+  that nothing touching a key, an RPC URL or `MODE` is settable from a web form.
 - Coin metadata URIs come from untrusted creators: only fetch allowlisted hosts (see `src/social.js`).
 
 ## Commands
@@ -63,14 +67,15 @@ One process, so all six share one API budget.
   insider networks, holder count. `parseReport` is pure and tested against the real response shape.
 - `src/smartwallets.js`: the locally learned wallet registry (sample → settle → score).
 - `src/filters.js`: the wallet-count gates. `src/feed.js`: the only place that talks to the network.
-- `src/config.js` + `src/envutil.js`: the window, the kill list, the trade shape, API budgets. New
-  settings are env-only; the dashboard form is money limits and nothing else.
+- `src/config.js` + `src/envutil.js`: the window, the kill list, the trade shape, API budgets — the
+  single source of every default and every range check. `src/settings.js` decides which of them the
+  dashboard may edit and in what units.
 - `src/devbook.js`, `src/holders.js`, `src/social.js`, `src/journal.js`, `src/state.js`, `src/meter.js`.
-- `public/` (vanilla JS, classic scripts, load order matters): `i18n.js` all UI strings + `t`/`tn`;
-  `anim.js` `setText`/`setNumber`; `humanize.js` turns raw log lines into plain sentences — **its
-  regexes match the exact log strings the agents print, so changing a log line breaks it** (there is
-  a test listing every line the agents produce); `bots-view.js` six agent rows; `funnel.js` the kill
-  reasons; `app.js` the fetch loop.
+- `public/`: three files, vanilla JS, no build step. `index.html` is the markup shell,
+  `styles.css` the tokens, `app.js` everything else — the 2s fetch loop, the equity chart (hand-
+  built SVG, no chart library), the agent rail, the funnel, and the per-agent settings sheet.
+  The equity curve is rebuilt client-side from `closedTrades`, because the paper account stores a
+  balance and a trade list, not a series.
 - `test/`: node:test suites, all offline. `PIPELINE.md`: how the six agents work. `.env.example`: all settings.
 
 ## Things that are easy to get wrong
@@ -129,10 +134,11 @@ The three-bot version's measured result is the baseline to beat: **180 trades, 2
 including `deskScore`, as decoration until `npm run report` shows it separating winners from losers.
 
 ## Not verified yet
-- **The dashboard has not been opened in a browser since the rewrite.** The payload, the dictionary
-  and the humanizer are covered by tests, but the six agent rows, the kill-funnel panel and the
-  `positionPct` form field (shown as %, stored as a fraction via `data-scale`) have only been read,
-  not seen. **Check this first.**
+- The settings sheets have been rendered and saved against a stopped desk, and the round trip is
+  covered by `test/settings.test.js`, but **no setting has yet been pushed to a RUNNING worker.**
+  Interval-driven settings (`DISCOVERY_TICK_MS`, `REFRESH_INTERVAL_MS`, `WATCH_POLL_INTERVAL_MS`)
+  are read when their timer is created, so changing those still needs a restart to take effect —
+  the sheet does not say so yet.
 - No trade has been taken end to end against live data by the new desk — the 100-second run never
   got a coin past the analyst. Entry, stop and trail are covered by unit tests only.
 - Whether `DESK_WEIGHTS`, `PASS_SCORE`, the window and the -6%/+12% shape are any good.
@@ -143,10 +149,15 @@ including `deskScore`, as decoration until `npm run report` shows it separating 
 - Stop button on Windows: `kill("SIGTERM")` ends the worker abruptly so `shutdown()` never runs. Use an IPC
   shutdown message first, force-kill after a timeout.
 - Positions with no fresh price for a minute close at the last known price (`max-hold-stale`): flatters results.
-- `/api/state` reads the whole paper state file synchronously every second.
+- `/api/state` parses the paper state file at most once a second and serves a cache in between
+  (`STATE_CACHE_MS` in `server.js`). It used to read it on every poll, which on Windows made the
+  worker's save fail: a rename onto a file another process has OPEN is refused with EPERM, the
+  throw escaped the 15s save timer, and the desk died with any open position left unmanaged.
+  `saveState` now retries a transient rename and `persist()` never rethrows — see
+  `test/state.test.js`. If you touch either, keep both halves: the retry and the cache.
 - README is out of date (it describes the old lanes and thresholds).
-- Money-limit defaults are duplicated in `server.js` and `src/config.js`; the server ignores the
-  worker's `settings-applied` / `settings-error` messages.
-- `server.js` emits Indonesian prose in logs and API errors, and `src/config.js` throws English
-  validation messages. The dashboard shows these raw, under "Technical details".
+- The server still ignores the worker's `settings-applied` / `settings-error` replies: a save is
+  reported as applied once the IPC message is handed off, not once the desk confirms it.
+- Settings the dashboard saves live in memory only. They survive a desk restart (the dashboard
+  re-forks the worker with them) but not a dashboard restart, which falls back to `.env`.
 - `.env.example` contains a real-looking Helius API key that should be rotated.

@@ -1,259 +1,102 @@
 <!doctype html>
-<html lang="id">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#10120f" />
-    <title>Launchpad — Entry Sniper</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=plain-language-1" />
-    <script src="/i18n.js?v=plain-language-1" defer></script>
-    <script src="/anim.js?v=plain-language-1" defer></script>
-    <script src="/humanize.js?v=plain-language-1" defer></script>
-    <script src="/bots-view.js?v=plain-language-1" defer></script>
-    <script src="/funnel.js?v=plain-language-1" defer></script>
-    <script src="/nav.js?v=plain-language-1" defer></script>
-    <script src="/app.js?v=plain-language-1" defer></script>
+    <meta name="theme-color" content="#050b08" />
+    <title>Memecoin Desk</title>
+    <link rel="stylesheet" href="/styles.css?v=desk-1" />
+    <script src="/app.js?v=desk-1" defer></script>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <a class="brand" href="#overview" aria-label="Launchpad home">
-          <span class="brand-mark"><span></span><span></span><span></span></span>
-          <span>launchpad<span class="brand-dot">.</span></span>
-        </a>
-        <div class="side-caption" data-i18n="side.caption">TERMINAL PAPER</div>
-        <nav class="side-nav" aria-label="Navigasi">
-          <a class="nav-link active" href="#overview"><span class="nav-icon">◈</span> <span data-i18n="nav.overview">Ringkasan</span></a>
-          <a class="nav-link" href="#bots"><span class="nav-icon">⧉</span> <span data-i18n="nav.bots">Bot</span></a>
-          <a class="nav-link" href="#screener"><span class="nav-icon">↗</span> <span data-i18n="nav.watchlist">Daftar hijau</span></a>
-          <a class="nav-link" href="#strategy"><span class="nav-icon">⌘</span> <span data-i18n="nav.strategy">Strategi</span></a>
-        </nav>
-        <div class="sidebar-bottom">
-          <div class="paper-chip"><span class="chip-dot"></span> <span data-i18n="side.paperChip">MODE LATIHAN</span><span class="help-mark" data-help="help.paper" tabindex="0" role="note">?</span></div>
-          <p data-i18n-html="side.paperNote">Hanya simulasi.<br />Tidak ada transaksi on-chain.</p>
-          <a class="docs-link" href="https://pumpportal.fun/data-api/real-time/" target="_blank" rel="noreferrer"><span data-i18n="side.docs">Dokumentasi feed</span> <span>↗</span></a>
+    <div class="wrap">
+      <header>
+        <div class="mark">M</div>
+        <div class="brand">
+          <h1>Memecoin Desk</h1>
+          <div class="sub">Solana &middot; paper</div>
         </div>
-      </aside>
+        <div class="ctrls">
+          <button id="btnRun" class="btn go" type="button">Start</button>
+          <button id="btnStop" class="btn stop" type="button">Stop</button>
+        </div>
+        <div class="spacer"></div>
+        <div class="hmeta" id="meta"></div>
+        <span id="status" class="badge"><span class="dot"></span><span id="statusText">connecting</span></span>
+      </header>
 
-      <main class="main-content" id="overview">
-        <header class="topbar">
+      <div id="error" class="err"></div>
+      <div class="grid kpis" id="kpis"></div>
+
+      <div class="main">
+        <section class="card">
+          <h2>Equity history &mdash; paper, SOL</h2>
+          <div class="chartwrap" id="chartwrap">
+            <div id="chart"></div>
+            <div class="tip" id="tip"></div>
+          </div>
+        </section>
+        <section class="card">
+          <h2>Activity log</h2>
+          <div class="log" id="feed"></div>
+        </section>
+      </div>
+
+      <section class="card" style="margin-bottom: 13px">
+        <div class="deskhead">
+          <h2 style="margin: 0">Desk &middot; 6 agents</h2>
+          <div class="deskstat">
+            <span class="pendbadge" id="deskPending" hidden></span>
+            <span class="n" id="deskScanned">0</span> scanned <i>&middot;</i>
+            <span class="n" id="deskTraded">0</span> traded
+          </div>
+        </div>
+        <div class="agents" id="agents"></div>
+      </section>
+
+      <div class="cols two" style="margin-bottom: 13px">
+        <section class="card">
+          <h2>Funnel &mdash; this session</h2>
+          <div id="funnel"></div>
+        </section>
+        <section class="card">
+          <h2>Kills by reason</h2>
+          <div id="kills"></div>
+        </section>
+      </div>
+
+      <div class="cols two">
+        <section class="card">
+          <h2>Closed trades</h2>
+          <div id="closed"></div>
+        </section>
+        <section class="card">
+          <h2>Scored but did not trade</h2>
+          <div id="near"></div>
+        </section>
+      </div>
+
+      <footer id="footer"></footer>
+    </div>
+
+    <div class="modal" id="modal" hidden>
+      <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+        <div class="sheetTop">
           <div>
-            <div class="eyebrow" id="sourceEyebrow" data-i18n="top.eyebrow">SOLANA · FEED PUMP.FUN</div>
-            <h1 data-i18n="top.title">Pemantau token AMM</h1>
-            <p class="top-subtitle" data-i18n="top.subtitle">Tiga bot berlatih bersama di satu halaman.</p>
+            <h3 id="mTitle">Settings</h3>
+            <div class="sheetBlurb" id="mBlurb"></div>
           </div>
-          <div class="topbar-right">
-            <div class="lang-switch" role="group" data-i18n-attr="aria-label:theme.switchLabel">
-              <button class="lang-option" type="button" data-theme-option="dark" data-i18n="theme.dark" data-i18n-attr="title:theme.dark">Gelap</button>
-              <button class="lang-option" type="button" data-theme-option="light" data-i18n="theme.light" data-i18n-attr="title:theme.light">Terang</button>
-            </div>
-            <div class="lang-switch" role="group" data-i18n-attr="aria-label:lang.switchLabel">
-              <button class="lang-option" type="button" data-lang="id">ID</button>
-              <button class="lang-option" type="button" data-lang="en">EN</button>
-            </div>
-            <div class="feed-status" id="feedStatus"><span class="status-dot"></span><span>Feed terputus</span></div>
-            <button class="button button-danger button-small hidden" id="stopButton" type="button" data-i18n="button.stop">Hentikan bot</button>
-          </div>
-        </header>
-
-        <section class="hero-panel">
-          <div class="hero-glow"></div>
-          <div class="hero-copy">
-            <div class="hero-label"><span class="hero-orb"></span> <span data-i18n="hero.label">LINGKUNGAN LATIHAN</span> <span class="hero-divider">/</span> <span data-i18n="hero.labelRight">TANPA TANDA TANGAN WALLET</span></div>
-            <h2><span data-i18n="hero.title1">Uji strategimu</span><br /><span data-i18n="hero.title2">sebelum masuk pasar.</span></h2>
-            <p data-i18n="hero.body">Bot menonton koin baru, menunggu harganya turun lalu memantul, dan mencatat beli/jual palsu.</p>
-          </div>
-          <div class="hero-side">
-            <div class="runtime-label" data-i18n="hero.runtimeLabel">STATUS BOT</div>
-            <div class="runtime-value" id="runtimeStatus">Siap dijalankan</div>
-            <div class="runtime-detail" id="runtimeDetail"></div>
-            <div class="hero-stat-row"><span data-i18n="hero.mode">Mode</span><strong data-i18n="hero.modeValue">Latihan saja</strong></div>
-            <div class="hero-stat-row"><span data-i18n="hero.pair">Pasangan</span><strong data-i18n="hero.pairValue">SOL / token AMM</strong></div>
-          </div>
-        </section>
-
-        <section class="panel bots-panel" id="bots" aria-live="polite" aria-atomic="false">
-          <div class="bots-split">
-            <div class="bot-rows-side">
-              <div class="bot-rows" id="botRows"></div>
-              <p class="now-sentence" id="nowSentence" data-i18n="now.stopped">Bot belum berjalan.</p>
-            </div>
-            <div class="bot-log-side" id="story">
-              <div class="bot-log-head">
-                <span data-i18n="log.title">Log</span>
-                <span class="stream-label"><span class="status-dot"></span> <span data-i18n="activity.note">Bahasa sehari-hari</span></span>
-              </div>
-              <div class="story-list" id="storyList"><div class="empty-state" data-i18n="activity.empty">Cerita akan muncul di sini begitu bot dijalankan.</div></div>
-              <details class="tech-details">
-                <summary><span data-i18n="activity.technical">Detail teknis (log asli)</span> <span class="tech-caret">+</span></summary>
-                <div class="log-list" id="logList"><div class="empty-state" data-i18n="activity.technicalEmpty">Belum ada log.</div></div>
-              </details>
-            </div>
-          </div>
-        </section>
-
-        <section class="metric-grid" aria-label="Statistik akun latihan">
-          <article class="metric-card">
-            <div class="metric-top"><span data-i18n="metric.balance">Saldo latihan</span><span class="metric-icon mint">◒</span></div>
-            <div class="metric-value" id="balanceValue">—</div>
-            <div class="metric-foot" data-i18n="metric.balanceFoot">SOL yang bisa dipakai beli</div>
-          </article>
-          <article class="metric-card">
-            <div class="metric-top"><span data-i18n="metric.pnl">Untung/rugi hari ini</span><span class="metric-icon" id="pnlIcon">↗</span></div>
-            <div class="metric-value" id="pnlValue">—</div>
-            <div class="metric-foot" data-i18n="metric.pnlFoot">Sudah termasuk fee dan slippage simulasi</div>
-          </article>
-          <article class="metric-card">
-            <div class="metric-top"><span data-i18n="metric.positions">Posisi terbuka</span><span class="metric-icon violet">◫</span></div>
-            <div class="metric-value" id="positionsValue">0</div>
-            <div class="metric-foot" id="positionsFoot"></div>
-          </article>
-          <article class="metric-card">
-            <div class="metric-top"><span data-i18n="metric.entries">Pembelian hari ini</span><span class="metric-icon amber">⌁</span></div>
-            <div class="metric-value" id="entriesValue">0</div>
-            <div class="metric-foot" id="entriesFoot"></div>
-          </article>
-        </section>
-
-        <section class="panel startup-diagnostics" aria-live="polite" aria-atomic="false">
-          <div class="panel-heading">
-            <div><div class="eyebrow" data-i18n="startup.eyebrow">KESIAPAN</div><h3 id="startupTitle">Siap dijalankan</h3></div>
-            <span class="panel-tag muted-tag" id="startupBadge">SIAP</span>
-          </div>
-          <div class="startup-body">
-            <div class="startup-message" id="startupMessage"></div>
-            <details class="tech-details">
-              <summary><span data-i18n="activity.technical">Detail teknis (log asli)</span> <span class="tech-caret">+</span></summary>
-              <div class="startup-events" id="startupEvents"></div>
-            </details>
-          </div>
-        </section>
-
-        <section class="panel screener-panel" id="screener">
-          <div class="panel-heading">
-            <div><div class="eyebrow" data-i18n="screener.eyebrow">HASIL SARINGAN BOT 2</div><h3 data-i18n="screener.title">Koin yang berpotensi pump</h3></div>
-            <div class="screener-total"><span class="screener-state-pill" id="screenerState">BOT BERHENTI</span><strong id="screenerActiveCount">0</strong><span data-i18n="screener.countMiddle">koin hijau dari maksimum</span><strong id="screenerCapacity">60</strong></div>
-          </div>
-          <div class="screener-stats">
-            <div><span data-i18n="screener.screened">Koin di-screening bot 1</span><strong id="statScreened">0</strong></div>
-            <div><span data-i18n="screener.perMinute">Koin per menit</span><strong id="statPerMinute">0</strong></div>
-            <div><span data-i18n="screener.rejected">Ditolak bot 2</span><strong id="statRejected">0</strong></div>
-            <div><span data-i18n="screener.bought">Dibeli bot 3 (latihan)</span><strong id="statBought">0</strong></div>
-          </div>
-          <div class="screener-content">
-            <div class="candidate-section">
-              <div class="screener-subheading"><strong data-i18n="screener.greenList">Daftar hijau</strong><span data-i18n="screener.greenNote">skor tertinggi dulu</span></div>
-              <div class="table-wrap screener-table-wrap">
-                <table class="screener-table">
-                  <thead><tr>
-                    <th data-i18n="th.token">Koin</th>
-                    <th data-i18n="th.age">Umur</th>
-                    <th data-i18n="th.score">Skor &amp; alasan</th>
-                    <th data-i18n="th.measured">Bagian terukur</th>
-                    <th data-i18n="th.marketCap">Market cap USD</th>
-                    <th data-i18n="th.bot3">Eksekusi</th>
-                  </tr></thead>
-                  <tbody id="screenerBody"></tbody>
-                </table>
-              </div>
-            </div>
-            <div class="screener-debug-section">
-              <div class="screener-subheading"><strong><span data-i18n="funnel.title">Mengapa koin ditolak</span><span class="help-mark" data-help="help.funnel" tabindex="0" role="note">?</span></strong><span data-i18n="funnel.note">sejak bot dijalankan</span></div>
-              <div class="screener-debug-list" id="funnelList"></div>
-            </div>
-          </div>
-        </section>
-
-        <div class="content-grid">
-          <div class="left-column">
-            <section class="panel" id="strategy">
-              <div class="panel-heading">
-                <div><div class="eyebrow" data-i18n="form.eyebrow">PENGATURAN</div><h3 data-i18n="form.title">Atur strategi</h3></div>
-                <span class="panel-tag" data-i18n="form.tag">LATIHAN</span>
-              </div>
-              <form id="strategyForm">
-                <div class="field-section">
-                  <div class="field-section-title" data-i18n="form.sourceTitle">Sumber data langsung</div>
-                  <div class="inline-note" data-i18n="form.sourceNote">Koin baru diawasi setelah pindah ke pool AMM.</div>
-                </div>
-
-                <div class="key-box" id="keyBox">
-                  <div class="key-heading"><span class="key-icon">⌑</span><div><strong data-i18n="form.keyTitle">PumpPortal API key (opsional)</strong><small data-i18n="form.keySub">Tidak wajib di mode gratis.</small></div></div>
-                  <label class="sr-only" for="apiKey">PumpPortal API key</label>
-                  <input id="apiKey" class="text-input settings-input" type="password" autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:form.keyPlaceholder" />
-                  <div class="key-help"><span data-i18n="form.keyHelp">Belum punya key?</span> <a href="https://pumpportal.fun/trading-api/setup/" target="_blank" rel="noreferrer" data-i18n="form.keyHelpLink">Buat di PumpPortal ↗</a></div>
-                  <div class="security-note" data-i18n="form.keyNote">Key hanya dipakai server lokal untuk data latihan.</div>
-                </div>
-
-                <div class="field-section">
-                  <div class="field-section-title" data-i18n="form.moneyTitle">Batas uang</div>
-                  <div class="field-grid two-col">
-                    <label><span data-i18n="form.startBalance">Saldo awal</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="paperStartBalanceSol" type="number" min="0.000001" step="any" value="1" /></label>
-                    <label><span data-i18n="form.positionPct">Porsi saldo per pembelian</span><span class="unit" data-i18n="unit.pct">%</span><input class="number-input settings-input" name="positionPct" type="number" min="0.1" max="100" step="any" value="8" data-scale="0.01" /></label>
-                    <label><span data-i18n="form.maxOpen">Posisi bersamaan</span><input class="number-input settings-input" name="maxOpenPositions" type="number" min="1" max="100" step="1" value="3" /></label>
-                    <label><span data-i18n="form.maxEntries">Batas beli per hari</span><input class="number-input settings-input" name="maxEntriesPerDay" type="number" min="1" max="10000" step="1" value="20" /></label>
-                    <label><span data-i18n="form.maxDailyLoss">Batas rugi harian</span><span class="unit" data-i18n="unit.sol">SOL</span><input class="number-input settings-input" name="maxDailyLossSol" type="number" min="0" step="any" value="0.05" /></label>
-                  </div>
-                  <div class="inline-note" data-i18n="form.sizeNote">Saldo awal hanya berlaku saat reset akun latihan.</div>
-                </div>
-
-                <div class="field-section">
-                  <div class="field-section-title" data-i18n="form.decideTitle">Yang diputuskan bot sendiri</div>
-                  <div class="inline-note" data-i18n="form.decideNote">Bot 2 menilai koin mana yang berpotensi pump; bot 3 mengukur ayunan harga tiap koin lalu menentukan sendiri kapan masuk, stop, dan jual. Tidak ada angka strategi untuk diatur di sini.</div>
-                </div>
-
-                <div class="form-actions">
-                  <button class="button button-primary" id="startButton" type="submit"><span>▶</span> <span data-i18n="form.start">Mulai paper scanner</span></button>
-                  <button class="button button-primary hidden" id="applySettingsButton" type="button" data-i18n="form.apply">Terapkan sekarang</button>
-                  <button class="button button-quiet" id="resetButton" type="button" data-i18n="form.reset">Reset akun latihan</button>
-                </div>
-                <div class="form-message" id="formMessage" role="status"></div>
-              </form>
-            </section>
-          </div>
-
-          <div class="right-column">
-            <section class="panel positions-panel">
-              <div class="panel-heading">
-                <div><div class="eyebrow" data-i18n="positions.eyebrow">LATIHAN</div><h3 data-i18n="positions.title">Koin yang dipegang sekarang</h3></div>
-                <div class="positions-actions">
-                  <button class="button button-danger button-small" id="closeAllButton" type="button" data-i18n="positions.closeAll" data-i18n-attr="title:positions.closeAllHelp">Tutup semua</button>
-                  <span class="count-badge" id="openCount">0</span>
-                </div>
-              </div>
-              <div id="positionsList" class="positions-list"></div>
-            </section>
-
-            <section class="panel trades-panel">
-              <div class="panel-heading">
-                <div><div class="eyebrow" data-i18n="trades.eyebrow">RIWAYAT</div><h3 data-i18n="trades.title">Jual-beli terakhir</h3></div>
-                <span class="panel-tag muted-tag" data-i18n="trades.note">20 terakhir</span>
-              </div>
-              <div class="table-wrap">
-                <table>
-                  <thead><tr>
-                    <th data-i18n="th.token">Koin</th>
-                    <th data-i18n="th.entryMc">MC saat beli</th>
-                    <th data-i18n="th.exitMc">MC saat jual</th>
-                    <th data-i18n="th.reason">Alasan jual</th>
-                    <th data-i18n="th.pnl">Untung/rugi</th>
-                  </tr></thead>
-                  <tbody id="tradesBody"></tbody>
-                </table>
-              </div>
-            </section>
-
-            <section class="info-card">
-              <div class="info-mark">i</div>
-              <div><strong data-i18n="info.title">Mode data gratis</strong><p data-i18n="info.body">Koin baru dari PumpPortal; harga dari DexScreener; pembeli berbeda dari GeckoTerminal.</p><a href="https://pumpportal.fun/fees/" target="_blank" rel="noreferrer" data-i18n="info.link">Rincian biaya PumpPortal ↗</a></div>
-            </section>
+          <button class="x" id="mClose" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div class="sheetBody" id="mBody"></div>
+        <div class="sheetFoot">
+          <div class="sheetMsg" id="mMsg"></div>
+          <div class="sheetBtns">
+            <button class="btn" id="mCancel" type="button">Cancel</button>
+            <button class="btn go" id="mSave" type="button">Save</button>
           </div>
         </div>
-        <footer data-i18n="footer.note">Hasil latihan tidak menjamin harga atau hasil sungguhan.</footer>
-      </main>
+      </div>
     </div>
   </body>
 </html>

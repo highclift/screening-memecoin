@@ -1,798 +1,1005 @@
-const $ = (selector) => document.querySelector(selector);
-const strategyForm = $("#strategyForm");
-const messageBox = $("#formMessage");
+// Memecoin Desk — the dashboard.
+//
+// One page, polled from /api/state every two seconds. The desk runs whether or not anyone is
+// looking at it, so this file only ever READS state and posts the four controls (start, stop,
+// close a position, save settings). It holds no model of its own.
+//
+// Everything here is built with DOM APIs and textContent. Coin names, log lines and API errors all
+// come from places the desk does not control — a creator picks the symbol, an upstream API writes
+// the error — so none of them may ever reach innerHTML. The only innerHTML in this file renders
+// the constant SVG path data in ICONS below, which contains no data of any kind.
+//
+// Money is SOL throughout, because SOL is what the paper account actually holds. Market caps are
+// USD because that is the unit both price APIs report them in.
 
-let settingsSnapshot = "";
-let refreshing = false;
-let currentRuntimeStatus = "stopped";
-let clientDiagnostics = [];
-let lastRuntimeSnapshot = {};
-let lastServerLogs = [];
-let lastScreenerSnapshot = {};
-let lastScreenerDebug = [];
-// Set once the first batch of feed lines has been drawn, so a page load does not animate 40 rows.
-let storyPrimed = false;
-// The message currently shown under the form, kept as { key, params } so it survives a language switch.
-let formMessage = null;
+const $ = (id) => document.getElementById(id);
 
-function shortMint(value) {
-  if (!value || value.length < 14) return value || "—";
-  return `${value.slice(0, 6)}…${value.slice(-5)}`;
+/** createElement with the two things every call needs: a class and its text. */
+function el(tag, options = {}, children = []) {
+  const node = document.createElement(tag);
+  if (options.class) node.className = options.class;
+  if (options.text !== undefined) node.textContent = options.text;
+  if (options.title) node.title = options.title;
+  for (const [name, value] of Object.entries(options.attrs ?? {})) node.setAttribute(name, value);
+  for (const child of children) if (child) node.append(child);
+  return node;
 }
 
-function signClass(value) {
-  return Number(value) >= 0 ? "positive" : "negative";
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
+  for (const child of children) if (child) node.append(child);
+  return node;
 }
 
-function isSyntheticToken(item) {
-  return item?.dataSource === "demo" || String(item?.mint ?? "").startsWith("DEMO-");
+const isNum = (n) => Number.isFinite(Number(n));
+const fmt = (n, d = 2) => (isNum(n) ? Number(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "--");
+const int = (n) => (isNum(n) ? Number(n).toLocaleString("en-US") : "--");
+const sgn = (n) => (Number(n) > 0 ? "+" : "");
+const cls = (n) => (Number(n) > 0 ? "up" : Number(n) < 0 ? "down" : "");
+const sol = (n, d = 4) => (isNum(n) ? `${fmt(n, d)} SOL` : "--");
+const solSigned = (n, d = 4) => (isNum(n) ? `${sgn(n)}${fmt(n, d)} SOL` : "--");
+const pct = (n, d = 1) => (isNum(n) ? `${fmt(n, d)}%` : "--");
+
+const hhmm = (iso) => {
+  const ms = typeof iso === "number" ? iso : Date.parse(iso);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleTimeString("en-GB", { hour12: false }) : "--";
+};
+
+const compact = (n) => {
+  const v = Number(n) || 0;
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v);
+};
+
+/** $300k, $20M, $40k — compact money for the agent rail. */
+function money(v) {
+  const n = Number(v);
+  if (!isNum(n)) return "?";
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(n % 1e9 ? 1 : 0)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(n % 1e3 ? 1 : 0)}k`;
+  return `$${Math.round(n)}`;
 }
 
-// A coin with no symbol or name is already shown by its shortened mint, so the mint sub-line
-// would just repeat it.
-function hasTokenName(item) {
-  return Boolean(item?.symbol || item?.name);
-}
+const mins = (ms) => Math.round(Number(ms) / 60000);
+const dur = (minutes) => (minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60}h` : `${minutes}m`);
 
-function tokenReference(label, item, className) {
-  const element = document.createElement(isSyntheticToken(item) ? "span" : "a");
-  element.className = className;
-  element.textContent = label;
-  if (!isSyntheticToken(item)) {
-    element.href = `https://axiom.trade/token/${encodeURIComponent(item.mint)}`;
-    element.target = "_blank";
-    element.rel = "noreferrer";
-    element.title = item.mint;
+/* ------------------------------------------------------------ venue links
+   pump.fun only has a page for tokens it minted — the rest are native
+   Raydium/Orca/Meteora pairs and would 404 there. pump.fun mints carry the
+   "pump" vanity suffix, so that decides the primary link; DexScreener is the
+   universal fallback and the market-cap cross-check. */
+const isPump = (mint) => typeof mint === "string" && mint.endsWith("pump");
+const dexUrl = (mint) => `https://dexscreener.com/solana/${encodeURIComponent(mint)}`;
+const pumpUrl = (mint) => `https://pump.fun/coin/${encodeURIComponent(mint)}`;
+
+/** A coin as a link to its venue, with an optional DexScreener cross-check chip. */
+function tokenLink(symbol, mint, { chip = true } = {}) {
+  const label = String(symbol || "").trim() || (mint ? `${String(mint).slice(0, 4)}…` : "?");
+  if (!mint) return el("span", { text: label });
+
+  const frag = document.createDocumentFragment();
+  const pumpMint = isPump(mint);
+  const link = el("a", {
+    class: "tl",
+    attrs: { href: pumpMint ? pumpUrl(mint) : dexUrl(mint), target: "_blank", rel: "noopener noreferrer" },
+    title: `${label} on ${pumpMint ? "pump.fun" : "DexScreener"} — live market cap`,
+  });
+  link.append(el("span", { text: label }), el("span", { class: "ext", text: "↗" }));
+  frag.append(link);
+
+  if (chip && pumpMint) {
+    frag.append(document.createTextNode(" "));
+    frag.append(el("a", {
+      class: "xc",
+      text: "dex",
+      attrs: { href: dexUrl(mint), target: "_blank", rel: "noopener noreferrer" },
+      title: `${label} on DexScreener — cross-check market cap`,
+    }));
   }
-  return element;
+  return frag;
 }
 
-// Every call to the dashboard server goes through here. A reply is not always JSON: a route that
-// does not exist in the running server answers with an HTML error page, and parsing that throws
-// "Unexpected token '<'", which tells nobody anything. This turns it into a sentence that does.
-async function postJson(path, body) {
-  const response = await fetch(path, {
+function replace(host, ...nodes) {
+  host.replaceChildren();
+  for (const node of nodes) if (node) host.append(node);
+}
+
+const emptyNote = (text) => el("div", { class: "empty", text });
+
+let latest = null;
+
+/* ---------------------------------------------------------------- equity
+   The paper account keeps a balance and a list of closed trades, not an
+   equity series, so the curve is rebuilt here: start, then one step per
+   closed trade, then a final point for where the book stands right now
+   (cash plus what the open positions would fetch after costs). */
+function equityOf(state) {
+  const account = state.account ?? {};
+  const start = Number(account.startBalanceSol ?? state.settings?.paperStartBalanceSol ?? 1);
+  const cash = Number(account.balanceSol ?? start);
+  const open = (account.openPositions ?? []).reduce(
+    (total, position) => total + (Number(position.costSol) || 0) + (Number(position.estimatedPnlSol) || 0),
+    0,
+  );
+  return { start, cash, open, equity: cash + open };
+}
+
+/** Closed trades oldest-first. The payload sends the newest 20 first. */
+const closedChronological = (state) =>
+  (state.account?.closedTrades ?? []).slice().reverse().filter((trade) => isNum(trade.closedAt));
+
+function equitySeries(state) {
+  const { start, equity } = equityOf(state);
+  const trades = closedChronological(state);
+  const points = [];
+
+  const firstAt = trades.length ? Number(trades[0].openedAt ?? trades[0].closedAt) : Date.now() - 3600_000;
+  points.push({ t: firstAt, v: start, label: "session start" });
+
+  let running = start;
+  for (const trade of trades) {
+    running += Number(trade.pnlSol) || 0;
+    points.push({ t: Number(trade.closedAt), v: running, label: String(trade.symbol || trade.mint || "trade") });
+  }
+  points.push({ t: Date.now(), v: equity, label: "now" });
+  return points;
+}
+
+/* ------------------------------------------------------------- KPI tiles */
+function tile(label, value, note, tone) {
+  return el("div", { class: "card" }, [
+    el("div", { class: "k-label", text: label }),
+    el("div", { class: `k-value ${tone || ""}`.trim(), text: value }),
+    el("div", { class: "k-note", text: note }),
+  ]);
+}
+
+function winRate(state) {
+  const trades = closedChronological(state);
+  if (!trades.length) return { rate: null, wins: 0, losses: 0, avgWin: null, avgLoss: null, capped: false };
+
+  let wins = 0;
+  let losses = 0;
+  const winPcts = [];
+  const lossPcts = [];
+  for (const trade of trades) {
+    const pnl = Number(trade.pnlSol) || 0;
+    const cost = Number(trade.costSol) || 0;
+    const movePct = cost > 0 ? (pnl / cost) * 100 : 0;
+    if (pnl >= 0) {
+      wins += 1;
+      winPcts.push(movePct);
+    } else {
+      losses += 1;
+      lossPcts.push(movePct);
+    }
+  }
+  const mean = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.length : null);
+  return {
+    rate: (wins / trades.length) * 100,
+    wins,
+    losses,
+    avgWin: mean(winPcts),
+    avgLoss: mean(lossPcts),
+    capped: trades.length >= 20,
+  };
+}
+
+function renderKpis(state) {
+  const bots = state.screener?.bots ?? {};
+  const { start, cash, equity } = equityOf(state);
+  const openCount = (state.account?.openPositions ?? []).length;
+
+  // All-time realised, summed from every closed trade the worker holds. The account's own
+  // realizedPnlSol is TODAY only — it is the number the daily loss limit is measured against.
+  const realised = isNum(bots.executor?.realizedPnlSol)
+    ? Number(bots.executor.realizedPnlSol)
+    : closedChronological(state).reduce((total, trade) => total + (Number(trade.pnlSol) || 0), 0);
+
+  const returnPct = start > 0 ? ((equity - start) / start) * 100 : null;
+  const wr = winRate(state);
+
+  // Ring gauge: one value against a 0-100 scale, with the label always present.
+  const radius = 30;
+  const circumference = 2 * Math.PI * radius;
+  const frac = wr.rate === null ? 0 : Math.max(0, Math.min(1, wr.rate / 100));
+  const ring = svg("svg", {
+    class: "gauge", width: 76, height: 76, viewBox: "0 0 76 76", role: "img",
+    "aria-label": `Win rate ${wr.rate === null ? "not available" : `${fmt(wr.rate, 1)} percent`}`,
+  }, [
+    svg("circle", { cx: 38, cy: 38, r: radius, fill: "none", stroke: "var(--surface-3)", "stroke-width": 7 }),
+    svg("circle", {
+      cx: 38, cy: 38, r: radius, fill: "none", stroke: "var(--series-1)", "stroke-width": 7,
+      "stroke-linecap": "round", "stroke-dasharray": circumference,
+      "stroke-dashoffset": circumference * (1 - frac),
+      transform: "rotate(-90 38 38)", style: "transition:stroke-dashoffset .5s ease",
+    }),
+  ]);
+  const ringText = svg("text", {
+    x: 38, y: 38, "text-anchor": "middle", "dominant-baseline": "central",
+    fill: "var(--text-primary)", "font-size": 15, "font-weight": 700,
+  });
+  ringText.textContent = wr.rate === null ? "--" : `${Math.round(wr.rate)}%`;
+  ring.append(ringText);
+
+  const gauge = el("div", { class: "card gaugecard" }, [
+    ring,
+    el("div", {}, [
+      el("div", { class: "k-label", text: "Win rate" }),
+      el("div", {
+        class: "k-note",
+        text: wr.rate === null ? "no closed trades" : `${wr.wins}W / ${wr.losses}L${wr.capped ? " (last 20)" : ""}`,
+      }),
+      el("div", {
+        class: "k-note",
+        text: wr.avgWin === null && wr.avgLoss === null
+          ? ""
+          : `avg ${wr.avgWin === null ? "--" : `${sgn(wr.avgWin)}${fmt(wr.avgWin, 1)}%`} / ${wr.avgLoss === null ? "--" : `${fmt(wr.avgLoss, 1)}%`}`,
+      }),
+    ]),
+  ]);
+
+  replace(
+    $("kpis"),
+    tile("Equity", sol(equity), `start ${fmt(start, 2)} · cash ${fmt(cash, 4)} SOL`),
+    tile("Total P&L", returnPct === null ? "--" : `${sgn(returnPct)}${fmt(returnPct)}%`, `realised ${solSigned(realised)}`, cls(returnPct)),
+    tile("Open", String(openCount), `${compact(bots.scout?.coins ?? 0)} coins · ${int(bots.logger?.kills ?? 0)} kills`),
+    gauge,
+  );
+}
+
+/* -------------------------------------------------- equity area chart */
+function renderChart(state) {
+  const host = $("chart");
+  const points = equitySeries(state).filter((p) => isNum(p.t) && isNum(p.v));
+
+  if (points.length < 2) {
+    replace(host, el("div", { class: "chartempty", text: "waiting for the first trade" }));
+    $("tip").style.opacity = 0;
+    return;
+  }
+
+  const W = Math.max(host.clientWidth || 640, 320);
+  const H = 268;
+  const L = 68;
+  const R = 16;
+  const T = 16;
+  const B = 26;
+  const pw = W - L - R;
+  const ph = H - T - B;
+
+  const { start } = equityOf(state);
+  const values = points.map((p) => p.v).concat(isNum(start) ? [start] : []);
+  let lo = Math.min(...values);
+  let hi = Math.max(...values);
+  // A flat equity curve is the truth when nothing has traded. Pad by a fixed fraction so it reads
+  // as flat, rather than amplifying rounding noise into something that looks like movement.
+  if (hi - lo < Math.max(hi * 0.004, 1e-6)) {
+    const pad = Math.max(hi * 0.004, 1e-6);
+    lo -= pad;
+    hi += pad;
+  } else {
+    const pad = (hi - lo) * 0.14;
+    lo -= pad;
+    hi += pad;
+  }
+
+  const t0 = points[0].t;
+  const t1 = points[points.length - 1].t;
+  const X = (t) => L + (t1 === t0 ? pw : ((t - t0) / (t1 - t0)) * pw);
+  const Y = (v) => T + ph - ((v - lo) / (hi - lo)) * ph;
+
+  const line = points.map((p, i) => `${i ? "L" : "M"}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join("");
+  const area = `${line}L${X(t1).toFixed(1)},${(T + ph).toFixed(1)}L${X(t0).toFixed(1)},${(T + ph).toFixed(1)}Z`;
+
+  const gradient = svg("linearGradient", { id: "eq", x1: 0, y1: 0, x2: 0, y2: 1 }, [
+    svg("stop", { offset: "0%", "stop-color": "var(--series-1)", "stop-opacity": ".34" }),
+    svg("stop", { offset: "100%", "stop-color": "var(--series-1)", "stop-opacity": "0" }),
+  ]);
+
+  const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Paper equity over time" }, [
+    svg("defs", {}, [gradient]),
+  ]);
+
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i += 1) {
+    const v = lo + ((hi - lo) * i) / ticks;
+    const y = Y(v);
+    chart.append(svg("line", { x1: L, y1: y.toFixed(1), x2: W - R, y2: y.toFixed(1), stroke: "var(--line-soft)", "stroke-width": 1 }));
+    const label = svg("text", {
+      x: L - 9, y: (y + 3.5).toFixed(1), "text-anchor": "end", fill: "var(--muted)",
+      "font-size": 10, "font-family": "ui-monospace,monospace",
+    });
+    label.textContent = v.toFixed(3);
+    chart.append(label);
+  }
+
+  // First, middle and last — but the points are spaced by WHEN they happened, not evenly, so a
+  // burst of trades inside one minute puts the middle label on top of the first one. Drop it
+  // unless it has room on both sides.
+  const lastIndex = points.length - 1;
+  const middleIndex = Math.floor(points.length / 2);
+  const roomFor = (i) => Math.abs(X(points[i].t) - X(points[0].t)) > 72 && Math.abs(X(points[lastIndex].t) - X(points[i].t)) > 72;
+  const labelled = [0, ...(roomFor(middleIndex) ? [middleIndex] : []), lastIndex];
+
+  for (const i of labelled) {
+    const p = points[i];
+    const label = svg("text", {
+      x: X(p.t).toFixed(1), y: H - 7,
+      "text-anchor": i === 0 ? "start" : i === lastIndex ? "end" : "middle",
+      fill: "var(--muted)", "font-size": 10, "font-family": "ui-monospace,monospace",
+    });
+    label.textContent = hhmm(p.t);
+    chart.append(label);
+  }
+
+  chart.append(svg("path", { d: area, fill: "url(#eq)" }));
+  chart.append(svg("path", { d: line, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+  const crossLine = svg("line", { y1: T, y2: T + ph, stroke: "var(--series-1)", "stroke-width": 1, "stroke-dasharray": "3 3", opacity: ".6" });
+  const crossDot = svg("circle", { r: 4.5, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 });
+  const cross = svg("g", { style: "opacity:0" }, [crossLine, crossDot]);
+  chart.append(cross);
+
+  const last = points[points.length - 1];
+  const lx = X(last.t);
+  const ly = Y(last.v);
+  chart.append(svg("circle", { cx: lx.toFixed(1), cy: ly.toFixed(1), r: 4.5, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 }));
+
+  const labelW = 92;
+  const flip = lx + labelW + 8 > W - R;
+  const badgeText = svg("text", {
+    x: labelW / 2, y: 4, "text-anchor": "middle", fill: "var(--text-primary)",
+    "font-size": 11.5, "font-weight": 700, "font-family": "ui-monospace,monospace",
+  });
+  badgeText.textContent = fmt(last.v, 4);
+  chart.append(svg("g", {
+    transform: `translate(${(flip ? lx - labelW - 9 : lx + 9).toFixed(1)}, ${Math.max(T + 9, Math.min(ly, T + ph - 9)).toFixed(1)})`,
+  }, [
+    svg("rect", { x: 0, y: -11, width: labelW, height: 22, rx: 6, fill: "var(--surface-3)", stroke: "var(--line)" }),
+    badgeText,
+  ]));
+
+  const hit = svg("rect", { x: L, y: T, width: pw, height: ph, fill: "transparent", style: "cursor:crosshair" });
+  chart.append(hit);
+  replace(host, chart);
+
+  // Hover layer: nearest point, crosshair and tooltip.
+  const tip = $("tip");
+  hit.addEventListener("mousemove", (event) => {
+    const box = chart.getBoundingClientRect();
+    const sx = (event.clientX - box.left) * (W / box.width);
+    let best = 0;
+    let bestDistance = Infinity;
+    points.forEach((p, i) => {
+      const d = Math.abs(X(p.t) - sx);
+      if (d < bestDistance) {
+        bestDistance = d;
+        best = i;
+      }
+    });
+    const p = points[best];
+    const px = X(p.t);
+    const py = Y(p.v);
+    cross.style.opacity = 1;
+    crossLine.setAttribute("x1", px);
+    crossLine.setAttribute("x2", px);
+    crossDot.setAttribute("cx", px);
+    crossDot.setAttribute("cy", py);
+
+    const delta = isNum(start) && start > 0 ? ((p.v - start) / start) * 100 : null;
+    const value = el("span", { class: "tv", text: `${fmt(p.v, 4)} SOL` });
+    const change = delta === null ? null : el("span", { class: cls(delta), text: ` ${sgn(delta)}${fmt(delta)}%` });
+    const when = el("span", { class: "tt", text: `${hhmm(p.t)} · ${p.label}` });
+    replace(tip, value, change, el("br"), when);
+    tip.style.opacity = 1;
+
+    const rel = px * (box.width / W);
+    tip.style.left = `${Math.min(Math.max(rel - tip.offsetWidth / 2, 2), box.width - tip.offsetWidth - 2)}px`;
+    tip.style.top = `${Math.max(py * (box.height / H) - tip.offsetHeight - 12, 2)}px`;
+  });
+  hit.addEventListener("mouseleave", () => {
+    cross.style.opacity = 0;
+    tip.style.opacity = 0;
+  });
+}
+
+/* ----------------------------------------------------------- agent rail */
+// Constant SVG path data. Nothing here is interpolated, which is why these may be assigned with
+// innerHTML; no value from the desk, an API or a coin creator is ever put through this path.
+const ICONS = {
+  scout: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+  filter: '<path d="M3 4h18l-7 8v7l-4 2v-9z"/>',
+  analyst: '<path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/>',
+  executor: '<path d="M4 12h12M12 6l6 6-6 6"/>',
+  risk: '<path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z"/>',
+  logger: '<path d="M5 5h14M5 10h14M5 15h9M5 20h6"/>',
+};
+const GEAR = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.24.58.78.98 1.4 1.01H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>';
+
+const AGENT_COLOR = {
+  scout: "var(--agent-scout)", filter: "var(--agent-filter)", analyst: "var(--agent-analyst)",
+  executor: "var(--agent-executor)", risk: "var(--agent-risk)", logger: "var(--agent-logger)",
+};
+
+/** The newest plain-language event at one of these levels, or null. */
+function lastEvent(state, levels) {
+  for (const entry of state.screenerDebug ?? []) {
+    if (levels.includes(entry.level)) return entry;
+  }
+  return null;
+}
+
+/** An agent's activity line: the coin it last acted on, then what happened. */
+function activityLine(state, event, idleText) {
+  if (!event) return el("span", { class: "idle", text: idleText });
+  const frag = document.createDocumentFragment();
+  if (event.mint) {
+    frag.append(tokenLink(symbolFor(state, event.mint), event.mint, { chip: false }));
+    frag.append(document.createTextNode(" "));
+  }
+  frag.append(el("span", { text: event.message ?? "" }));
+  return frag;
+}
+
+/** Best-effort mint -> symbol, from wherever the payload happens to name it. */
+function symbolFor(state, mint) {
+  const bots = state.screener?.bots ?? {};
+  const pools = [
+    state.account?.openPositions ?? [],
+    bots.analyst?.candidates ?? [],
+    bots.executor?.watching ?? [],
+    bots.scout?.recent ?? [],
+    state.account?.closedTrades ?? [],
+  ];
+  for (const pool of pools) {
+    const hit = pool.find((item) => item.mint === mint && item.symbol);
+    if (hit) return hit.symbol;
+  }
+  return "";
+}
+
+function agentRow({ key, name, rule, activity, metric, tone }) {
+  const icon = el("button", {
+    class: "agico",
+    title: `${name} settings`,
+    attrs: { type: "button", "data-agent": key, style: `background:${AGENT_COLOR[key]}`, "aria-label": `${name} settings` },
+  });
+  const glyph = svg("svg", { class: "ico", viewBox: "0 0 24 24", "stroke-linecap": "round", "stroke-linejoin": "round" });
+  glyph.innerHTML = ICONS[key];
+  const gearWrap = el("span", { class: "gear" });
+  const gear = svg("svg", { viewBox: "0 0 24 24", "stroke-linecap": "round" });
+  gear.innerHTML = GEAR;
+  gearWrap.append(gear);
+  icon.append(glyph, gearWrap);
+
+  const identity = el("div", {}, [
+    el("div", { class: "agname", text: name }),
+    el("div", { class: "agrule", text: rule }),
+  ]);
+  const act = el("div", { class: "agact" });
+  act.append(activity);
+
+  return el("div", { class: "ag" }, [icon, identity, act, el("div", { class: `agmetric ${tone}`, text: metric })]);
+}
+
+function renderAgents(state) {
+  const bots = state.screener?.bots;
+  if (!bots) {
+    replace($("agents"), emptyNote("the desk is not running"));
+    $("deskScanned").textContent = "0";
+    $("deskTraded").textContent = "0";
+    return;
+  }
+
+  const { scout = {}, filter = {}, analyst = {}, executor = {}, risk = {}, logger = {} } = bots;
+  const settings = state.settings ?? {};
+  const window = scout.window ?? {};
+  const limits = filter.limits ?? {};
+
+  const scoutSighting = (scout.recent ?? [])[0];
+  const scoutEvent = scoutSighting
+    ? { mint: scoutSighting.mint, message: `seen via ${scoutSighting.source ?? "feed"}` }
+    : lastEvent(state, ["candidate"]);
+
+  const reasons = Object.keys(logger.byCategory ?? {}).length;
+  const topCandidate = (analyst.candidates ?? [])[0];
+
+  const rows = [
+    {
+      key: "scout", name: "Scout",
+      rule: `age ${dur(Math.round((window.minAgeSeconds ?? 0) / 60))}–${Math.round((window.maxAgeSeconds ?? 0) / 3600)}h · ${money(window.minMarketCapUsd)}–${money(window.maxMarketCapUsd)}`,
+      activity: activityLine(state, scoutEvent, "nothing seen yet"),
+      metric: `${compact(scout.coins ?? 0)} coins`,
+      tone: scout.inWindow > 0 ? "on" : "off",
+    },
+    {
+      key: "filter", name: "Filter",
+      rule: `liq ≥${money(limits.minLiquidityUsd)} · LP ≥${limits.minLpLockedPct ?? "?"}% · dev ≤${limits.maxDevPct ?? "?"}% · 1h <${limits.maxPriceChangeH1 ?? "?"}%`,
+      activity: activityLine(state, lastEvent(state, ["filtered"]), "nothing to judge yet"),
+      metric: `${int(filter.killed ?? 0)} killed`,
+      tone: filter.killed > 0 ? "no" : "off",
+    },
+    {
+      key: "analyst", name: "Analyst",
+      rule: `scores survivors · ${analyst.passScore ?? "?"}+ passes`,
+      activity: topCandidate
+        ? activityLine(state, { mint: topCandidate.mint, message: `scores ${fmt(topCandidate.score, 1)}` }, "")
+        : activityLine(state, null, "nothing cleared the filter"),
+      metric: `${int(analyst.scored ?? 0)} scored`,
+      tone: analyst.passingNow > 0 ? "on" : analyst.scored > 0 ? "no" : "off",
+    },
+    {
+      key: "executor", name: "Executor",
+      rule: `${fmt((settings.positionPct ?? 0) * 100, 0)}% of equity · ${settings.maxOpenPositions ?? "?"} slots`,
+      activity: activityLine(state, lastEvent(state, ["entry", "exit"]), executor.watchingCount ? `watching ${executor.watchingCount}` : "nothing passed yet"),
+      metric: `≤ ${fmt((settings.positionPct ?? 0) * 100, 0)}%`,
+      tone: executor.entries > 0 ? "on" : "off",
+    },
+    {
+      key: "risk", name: "Risk",
+      rule: `−${fmt((risk.stopPct ?? 0) * 100, 0)}% stop · trail ${fmt((risk.trailPct ?? 0) * 100, 0)}% at +${fmt((risk.trailAfterPct ?? 0) * 100, 0)}%`,
+      activity: risk.blockedReason
+        ? el("span", { text: risk.blockedReason })
+        : activityLine(state, lastEvent(state, ["blocked"]), executor.openPositions ? `${executor.openPositions} open` : "no open risk"),
+      metric: executor.openPositions > 0 ? `${executor.openPositions} open` : risk.blockedReason ? "halted" : `halt ${sol(risk.maxDailyLossSol ?? 0, 2)}`,
+      tone: executor.openPositions > 0 ? "on" : risk.blockedReason ? "no" : "off",
+    },
+    {
+      key: "logger", name: "Logger",
+      rule: "a reason for every kill",
+      activity: activityLine(state, lastEvent(state, ["filtered", "blocked", "info"]), "nothing logged yet"),
+      metric: `${reasons} reason${reasons === 1 ? "" : "s"}`,
+      tone: logger.kills > 0 ? "on" : "off",
+    },
+  ];
+
+  replace($("agents"), ...rows.map(agentRow));
+  $("deskScanned").textContent = compact(scout.coins ?? 0);
+  $("deskTraded").textContent = int(executor.entries ?? 0);
+
+  // Settings saved while the desk was down cannot reach a worker that is not there.
+  const pending = Boolean(pendingRestart) && state.runtime?.status !== "running";
+  $("deskPending").hidden = !pending;
+  $("deskPending").textContent = pending ? "settings saved — they apply on the next Start" : "";
+}
+
+/* --------------------------------------------------------------- funnel */
+function renderFunnel(state) {
+  const bots = state.screener?.bots;
+  if (!bots) {
+    replace($("funnel"), emptyNote("no session yet"));
+    return;
+  }
+  const { scout = {}, filter = {}, analyst = {}, executor = {} } = bots;
+
+  // Every step is a RUNNING TOTAL, so each percentage is a real share of the step above it. The
+  // watchlist is the one number the executor keeps as a live count, so the total that ever reached
+  // it is rebuilt here: the ones it bought, the ones it gave up on, and the ones still on it.
+  const watched = (executor.entries ?? 0) + (executor.dropped ?? 0) + (executor.watchingCount ?? 0);
+
+  const steps = [
+    ["discovered", scout.coins ?? 0],
+    ["in window", scout.inWindow ?? 0],
+    ["cleared", filter.passed ?? 0],
+    ["scored", analyst.scored ?? 0],
+    [`passed ${analyst.passScore ?? 70}+`, analyst.passed ?? 0],
+    ["watched", watched],
+    ["fills", executor.entries ?? 0],
+  ];
+  const max = Math.max(...steps.map(([, v]) => v), 1);
+
+  const nodes = steps.map(([name, value], i) => {
+    const previous = i === 0 ? null : steps[i - 1][1];
+    const share = previous === null ? null : previous === 0 ? 0 : (value / previous) * 100;
+    const bar = el("div", { class: "fbar" });
+    bar.style.width = `${Math.max((value / max) * 100, value > 0 ? 1.5 : 0)}%`;
+    const count = el("div", { class: "fcount", text: int(value) });
+    if (share !== null) {
+      count.append(document.createTextNode(" "));
+      count.append(el("span", { class: "fpct", text: `${share.toFixed(0)}%` }));
+    }
+    return el("div", { class: "fstep" }, [
+      el("div", { class: "fname", text: name }),
+      el("div", { class: "ftrack" }, [bar]),
+      count,
+    ]);
+  });
+
+  nodes.push(el("div", {
+    class: "bd",
+    text: `${int(scout.universeSize ?? 0)} coins held in the registry · ${int(executor.watchingCount ?? 0)} on the watchlist right now · ${int(filter.waiting ?? 0)} waiting on a safety check`,
+  }));
+  nodes[nodes.length - 1].style.marginTop = "9px";
+  replace($("funnel"), ...nodes);
+}
+
+function renderKills(state) {
+  const byCategory = state.screener?.bots?.logger?.byCategory ?? {};
+  const rows = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) {
+    replace($("kills"), emptyNote("no kills recorded yet"));
+    return;
+  }
+  const max = rows[0][1];
+  replace($("kills"), ...rows.slice(0, 13).map(([reason, count]) => {
+    const fill = el("div", { class: "kbf" });
+    fill.style.width = `${(count / max) * 100}%`;
+    return el("div", { class: "kill" }, [
+      el("div", { class: "kb" }, [fill, el("div", { class: "kbl", text: reason })]),
+      el("div", { class: "kn", text: int(count) }),
+    ]);
+  }));
+}
+
+/* ------------------------------------------------------- closed trades */
+function renderClosed(state) {
+  const trades = state.account?.closedTrades ?? [];
+  if (!trades.length) {
+    replace($("closed"), emptyNote("no closed trades yet"));
+    return;
+  }
+  const head = el("tr", {}, [
+    el("th", { text: "Coin" }),
+    el("th", { text: "Exit" }),
+    el("th", { class: "num", text: "P&L" }),
+    el("th", { class: "num", text: "Held" }),
+    el("th", { class: "num", text: "Score" }),
+  ]);
+  const body = el("tbody");
+  for (const trade of trades) {
+    const cost = Number(trade.costSol) || 0;
+    const pnl = Number(trade.pnlSol) || 0;
+    const movePct = cost > 0 ? (pnl / cost) * 100 : null;
+    const held = isNum(trade.openedAt) && isNum(trade.closedAt) ? mins(trade.closedAt - trade.openedAt) : null;
+
+    const coin = el("td", { class: "sym" });
+    coin.append(tokenLink(trade.symbol, trade.mint, { chip: false }));
+    body.append(el("tr", {}, [
+      coin,
+      el("td", { text: trade.reason ?? "" }),
+      el("td", { class: `num ${cls(pnl)}`, text: movePct === null ? solSigned(pnl) : `${sgn(movePct)}${fmt(movePct)}%` }),
+      el("td", { class: "num", text: held === null ? "--" : `${held}m` }),
+      el("td", { class: "num", text: isNum(trade.entryScore) ? fmt(trade.entryScore, 0) : "--" }),
+    ]));
+  }
+  replace($("closed"), el("table", {}, [el("thead", {}, [head]), body]));
+}
+
+/* ------------------------------------------- scored but did not trade */
+function renderNear(state) {
+  const candidates = state.screener?.bots?.analyst?.candidates ?? [];
+  if (!candidates.length) {
+    replace($("near"), emptyNote("nothing has reached the analyst yet"));
+    return;
+  }
+  replace($("near"), ...candidates.slice(0, 12).map((candidate) => {
+    const line = el("div", {});
+    line.append(el("span", { class: `sc ${candidate.score >= 70 ? "up" : ""}`.trim(), text: fmt(candidate.score, 1) }));
+    const name = el("b");
+    name.append(tokenLink(candidate.symbol, candidate.mint));
+    line.append(name, document.createTextNode(" "));
+
+    const detail = [
+      isNum(candidate.marketCapUsd) ? money(candidate.marketCapUsd) : null,
+      isNum(candidate.liquidityUsd) ? `liq ${money(candidate.liquidityUsd)}` : null,
+      isNum(candidate.buyersH1) ? `${candidate.buyersH1} buyers/h` : null,
+      isNum(candidate.ageSeconds) ? `${dur(Math.round(candidate.ageSeconds / 60))} old` : null,
+      // How much of the score was actually measured rather than defaulted. A coin scoring well on
+      // two known parts and four shrugs is not the same bet as one measured all the way through.
+      isNum(candidate.measured) ? `measured ${candidate.measured}/6` : null,
+      candidate.lead ? `led by ${candidate.lead}` : null,
+    ].filter(Boolean).join(" · ");
+    line.append(el("span", { class: "bd", text: detail }));
+
+    const row = el("div", { class: "miss" }, [line]);
+
+    // The six score parts, each a 0-1 fraction of its own weight. An unmeasured part is stored as
+    // a neutral 0.5 rather than a zero, so 0.50 here reads as "not known", not "bad".
+    const parts = candidate.parts && typeof candidate.parts === "object" ? Object.entries(candidate.parts) : [];
+    if (parts.length) {
+      const text = parts
+        .map(([part, value]) => `${part} ${isNum(value) ? fmt(value, 2) : "n/a"}`)
+        .join(" · ");
+      const details = el("details", {}, [el("summary", { text: "components" })]);
+      const bd = el("div", { class: "bd", text });
+      bd.style.paddingTop = "5px";
+      details.append(bd);
+      row.append(details);
+    }
+    return row;
+  }));
+}
+
+/* ---------------------------------------------------------- activity log */
+// The worker tags each event; anything unexpected falls back to a neutral chip.
+const KNOWN_LEVELS = new Set(["candidate", "entry", "exit", "blocked", "filtered", "info", "warning", "error"]);
+const LEVEL_TAG = {
+  candidate: "look", entry: "entry", exit: "exit", blocked: "halt",
+  filtered: "kill", info: "info", warning: "warn", error: "error",
+};
+const LEVEL_CLASS = {
+  filtered: "kill", candidate: "candidate", entry: "entry", exit: "exit",
+  blocked: "blocked", info: "info", warning: "blocked", error: "error",
+};
+
+function renderFeed(state) {
+  const events = state.screenerDebug ?? [];
+  if (!events.length) {
+    replace($("feed"), emptyNote("no events yet"));
+    return;
+  }
+  replace($("feed"), ...events.map((event) => {
+    const level = KNOWN_LEVELS.has(event.level) ? event.level : "info";
+    const message = el("div", { class: "msg" });
+    if (event.mint) {
+      const name = el("b");
+      name.append(tokenLink(symbolFor(state, event.mint), event.mint, { chip: false }));
+      message.append(name, document.createTextNode(" "));
+    }
+    message.append(el("span", { text: event.message ?? "" }));
+    return el("div", { class: "ev" }, [
+      el("div", { class: "t", text: hhmm(event.timestamp) }),
+      el("div", { class: `tag ${LEVEL_CLASS[level]}`, text: LEVEL_TAG[level] }),
+      message,
+    ]);
+  }));
+}
+
+/* ------------------------------------------------------------- controls */
+let busy = false;
+
+/**
+ * The buttons follow the WORKER, not the freshness of the log: a desk that is alive but between
+ * ticks would otherwise read as stopped and offer to start a second one.
+ */
+function renderControls(state) {
+  if (busy) return;
+  const run = $("btnRun");
+  const stop = $("btnStop");
+  const running = state.runtime?.status === "running";
+
+  run.textContent = running ? "Restart" : "Start";
+  run.className = `btn ${running ? "warn" : "go"}`;
+  run.dataset.action = running ? "restart" : "start";
+  run.title = running ? "Stop the desk and start it again — the paper book is kept" : "Start the desk";
+  stop.disabled = !running;
+  stop.title = running ? "Stop the desk; open positions stay open and unmanaged" : "The desk is not running";
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
-  let result = null;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+async function control(action, button) {
+  if (busy) return;
+  if (action === "stop" && !confirm("Stop the desk? Open positions stay open and unmanaged until it runs again.")) return;
+
+  busy = true;
+  const label = button.textContent;
+  button.textContent = action === "stop" ? "Stopping…" : action === "restart" ? "Restarting…" : "Starting…";
+  $("btnRun").classList.add("busy");
+  $("btnStop").classList.add("busy");
   try {
-    result = await response.json();
-  } catch {
-    result = null;
-  }
-  if (result === null) {
-    throw new Error(response.status === 404
-      ? t("msg.staleServer")
-      : t("msg.badResponse", { status: response.status }));
-  }
-  if (!response.ok) throw new Error(result.error || t("msg.badResponse", { status: response.status }));
-  return result;
-}
-
-function showMessage(key, params, isError = false) {
-  formMessage = key ? { key, params, isError } : null;
-  messageBox.textContent = key ? t(key, params) : "";
-  messageBox.classList.toggle("error", Boolean(isError));
-}
-
-// Raw text from the server (an API error) has no dictionary key, so it is shown verbatim.
-function showRawMessage(text, isError = true) {
-  formMessage = null;
-  messageBox.textContent = String(text);
-  messageBox.classList.toggle("error", isError);
-}
-
-function addClientDiagnostic(level, message) {
-  const entry = { timestamp: new Date().toISOString(), level, message: String(message).slice(0, 500) };
-  if (clientDiagnostics[0]?.message === entry.message && clientDiagnostics[0]?.level === entry.level) return;
-  clientDiagnostics.unshift(entry);
-  if (clientDiagnostics.length > 20) clientDiagnostics.length = 20;
-  renderStartupDiagnostics(lastRuntimeSnapshot, lastServerLogs, lastScreenerSnapshot);
-}
-
-window.addEventListener("error", (event) => {
-  addClientDiagnostic("error", `Dashboard JavaScript error: ${event.message || "unknown"}`);
-});
-window.addEventListener("unhandledrejection", (event) => {
-  addClientDiagnostic("error", `Dashboard request failed: ${event.reason?.message ?? String(event.reason)}`);
-});
-
-strategyForm.addEventListener("invalid", (event) => {
-  const input = event.target;
-  const field = input?.name || input?.id || "input";
-  addClientDiagnostic("error", `Validation failed for ${field}: ${input?.validationMessage || "invalid value"}`);
-}, true);
-
-// ---------- language switch ----------
-function syncLangButtons() {
-  for (const button of document.querySelectorAll(".lang-option")) {
-    const active = button.dataset.lang === lang();
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", String(active));
-  }
-}
-
-for (const button of document.querySelectorAll("[data-lang]")) {
-  button.addEventListener("click", () => setLang(button.dataset.lang));
-}
-
-// ---------- appearance ----------
-function syncThemeButtons() {
-  for (const button of document.querySelectorAll("[data-theme-option]")) {
-    const active = button.dataset.themeOption === theme();
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", String(active));
-  }
-}
-
-for (const button of document.querySelectorAll("[data-theme-option]")) {
-  button.addEventListener("click", () => setTheme(button.dataset.themeOption));
-}
-
-onThemeChange(syncThemeButtons);
-
-onLangChange(() => {
-  syncLangButtons();
-  // Re-draw everything derived from data so the new language reaches generated text too.
-  if (formMessage) showMessage(formMessage.key, formMessage.params, formMessage.isError);
-  setRuntime(lastRuntimeSnapshot);
-  renderStartupDiagnostics(lastRuntimeSnapshot, lastServerLogs, lastScreenerSnapshot);
-  renderScreener(lastScreenerSnapshot, lastRuntimeSnapshot);
-  renderStory(lastServerLogs);
-  renderTechnicalLog(lastServerLogs, lastScreenerDebug);
-  renderNowHeadline(lastRuntimeSnapshot, lastScreenerSnapshot);
-  renderBotCards(lastScreenerSnapshot, lastRuntimeSnapshot);
-  refresh();
-});
-
-// Only money limits are left in the form: the window, the kill list and the pass mark are the
-// desk's definition of itself and live in .env.
-//
-// A field may be shown in friendlier units than it is stored in (`data-scale`): the position size
-// is a fraction everywhere in the code and a percentage in the form, because nobody thinks in 0.08.
-const scaleOf = (input) => Number(input?.dataset?.scale) || 1;
-
-function applySettings(settings) {
-  for (const [name, rawValue] of Object.entries(settings ?? {})) {
-    const input = strategyForm.elements.namedItem(name);
-    if (!input || document.activeElement === input) continue;
-    const scale = scaleOf(input);
-    const value = Number(rawValue);
-    input.value = String(scale === 1 || !Number.isFinite(value) ? rawValue : Number((value / scale).toFixed(6)));
-  }
-}
-
-function collectSettings() {
-  const settings = {};
-  for (const [name, rawValue] of new FormData(strategyForm).entries()) {
-    const input = strategyForm.elements.namedItem(name);
-    settings[name] = Number(rawValue) * scaleOf(input);
-  }
-  return settings;
-}
-
-function setRuntime(runtime = {}) {
-  currentRuntimeStatus = runtime.status ?? "stopped";
-  const running = ["starting", "running", "stopping"].includes(runtime.status);
-  const status = $("#feedStatus");
-  status.classList.toggle("connected", Boolean(runtime.feedConnected));
-  status.classList.toggle("pending", running && !runtime.feedConnected);
-  setText(status.lastElementChild, runtime.feedConnected
-    ? t("feed.connected")
-    : running ? t("feed.connecting") : t("feed.disconnected"));
-
-  const titleKey = {
-    starting: "runtime.starting",
-    running: "runtime.running",
-    stopping: "runtime.stopping",
-    stopped: "runtime.stopped",
-    error: "runtime.error",
-  }[runtime.status] ?? "runtime.stopped";
-  setText($("#runtimeStatus"), t(titleKey));
-  setText($("#runtimeDetail"), runtime.feedConnected
-    ? t("runtime.detail.running")
-    : running
-      ? t("runtime.detail.connecting")
-      : runtime.hasApiKey
-        ? t("runtime.detail.hasKey")
-        : t("runtime.detail.noKey"));
-
-  $("#startButton").classList.toggle("hidden", running);
-  $("#startButton").disabled = running;
-  $("#applySettingsButton").classList.toggle("hidden", runtime.status !== "running");
-  $("#applySettingsButton").disabled = runtime.status !== "running";
-  $("#stopButton").classList.toggle("hidden", !running);
-  $("#apiKey").disabled = running;
-  for (const input of document.querySelectorAll(".settings-input")) {
-    if (input.id !== "apiKey") input.disabled = runtime.status === "stopping";
-  }
-  $("#resetButton").disabled = running;
-}
-
-function renderAccount(account, settings) {
-  setNumber($("#balanceValue"), account.balanceSol, (n) => fmtSol(n, 4));
-  const pnl = Number(account.realizedPnlSol ?? 0);
-  const pnlElement = $("#pnlValue");
-  setNumber(pnlElement, pnl, (n) => fmtSolSigned(n, 4));
-  pnlElement.classList.toggle("positive", pnl > 0);
-  pnlElement.classList.toggle("negative", pnl < 0);
-  $("#pnlIcon").classList.toggle("negative", pnl < 0);
-  setNumber($("#positionsValue"), account.openPositions.length, fmtInt);
-  setText($("#positionsFoot"), t("metric.positionsFoot", { limit: fmtInt(settings.maxOpenPositions) }));
-  setNumber($("#entriesValue"), account.entriesToday, fmtInt);
-  setText($("#entriesFoot"), t("metric.entriesFoot", { limit: fmtInt(settings.maxEntriesPerDay) }));
-  setText($("#openCount"), fmtInt(account.openPositions.length));
-  renderPositions(account.openPositions);
-  renderClosedTrades(account.closedTrades);
-}
-
-function emptyState(key) {
-  const empty = document.createElement("div");
-  empty.className = "empty-state";
-  empty.textContent = t(key);
-  return empty;
-}
-
-function renderPositions(positions) {
-  const container = $("#positionsList");
-  container.replaceChildren();
-  if (!positions.length) {
-    container.append(emptyState("positions.empty"));
-    return;
-  }
-  for (const position of positions) {
-    const row = document.createElement("div");
-    row.className = "position-row";
-    const ident = document.createElement("div");
-    ident.className = "token-ident";
-    const avatar = document.createElement("div");
-    avatar.className = "token-avatar";
-    avatar.textContent = (position.symbol || position.name || "?").slice(0, 2).toUpperCase();
-    const nameWrap = document.createElement("div");
-    const tokenLabelText = position.symbol || position.name || shortMint(position.mint);
-    const nameRef = tokenReference(tokenLabelText, position, "token-name token-link");
-    nameWrap.append(nameRef);
-    if (isSyntheticToken(position) || hasTokenName(position)) {
-      const mint = document.createElement("div");
-      mint.className = "token-sub";
-      mint.textContent = "DEMO";
-      nameWrap.append(isSyntheticToken(position)
-        ? mint
-        : tokenReference(shortMint(position.mint), position, "token-sub token-link"));
-    }
-    ident.append(avatar, nameWrap);
-
-    const numbers = document.createElement("div");
-    numbers.className = "position-numbers";
-    const pnl = document.createElement("div");
-    const pnlValue = Number(position.estimatedPnlSol ?? 0);
-    pnl.className = `position-pnl ${signClass(pnlValue)}`;
-    pnl.textContent = fmtSolSigned(pnlValue, 4);
-    const cost = document.createElement("div");
-    cost.className = "position-cost";
-    cost.textContent = t("positions.cost", {
-      cost: fmtSol(position.costSol, 3),
-      entry: fmtUsdExact(position.entryMarketCapUsd),
-      now: fmtUsdExact(position.currentMarketCapUsd),
-    });
-    numbers.append(pnl, cost);
-
-    // Emergency exit for this one coin. Confirmed, because it spends the position immediately.
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "button button-quiet button-small position-close";
-    close.textContent = t("positions.close");
-    close.title = t("positions.closeHelp");
-    close.addEventListener("click", () => closePositions(position.mint, tokenLabelText));
-
-    row.append(ident, numbers, close);
-    container.append(row);
-  }
-}
-
-// mint = close that one; null = close everything.
-async function closePositions(mint, label) {
-  const question = mint ? t("msg.closeConfirm", { token: label }) : t("msg.closeAllConfirm");
-  if (!window.confirm(question)) return;
-  try {
-    await postJson("/api/close", mint ? { mint } : {});
-    showMessage(mint ? "msg.closed" : "msg.closedAll");
-    await refresh();
+    if (action === "stop" || action === "restart") await postJson("/api/stop");
+    if (action === "start" || action === "restart") await postJson("/api/start", { settings: latest?.settings });
+    $("error").textContent = "";
   } catch (error) {
-    showRawMessage(error.message);
+    $("error").textContent = `control: ${error.message}`;
+    button.textContent = label;
+  } finally {
+    $("btnRun").classList.remove("busy");
+    $("btnStop").classList.remove("busy");
+    busy = false;
+    await tick();
   }
 }
 
-function mcCell(value, note) {
-  const cell = document.createElement("td");
-  cell.textContent = fmtUsdExact(value);
-  if (note) {
-    const sub = document.createElement("span");
-    sub.className = "trade-mint";
-    sub.textContent = note;
-    cell.append(sub);
-  }
-  return cell;
+$("btnRun").addEventListener("click", (event) => control(event.currentTarget.dataset.action || "start", event.currentTarget));
+$("btnStop").addEventListener("click", (event) => control("stop", event.currentTarget));
+
+/* ------------------------------------------------------- settings modal */
+let SCHEMA = null;
+let VALUES = null;
+let openAgent = null;
+let pendingRestart = false;
+
+const fieldId = (name) => `f_${name}`;
+
+async function loadSettings() {
+  const response = await fetch("/api/settings", { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const body = await response.json();
+  SCHEMA = body.schema;
+  VALUES = body.values;
+  return body;
 }
 
-function renderClosedTrades(trades) {
-  const body = $("#tradesBody");
-  body.replaceChildren();
-  if (!trades.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 5;
-    cell.className = "empty-cell";
-    cell.textContent = t("trades.empty");
-    row.append(cell);
-    body.append(row);
-    return;
+/** The edited value of one field, straight from its input. */
+function readField(field) {
+  const input = $(fieldId(field.name));
+  if (!input) return VALUES[field.name];
+  if (field.type === "bool") return input.checked;
+  if (field.type === "enum") return input.value;
+  return Number(input.value);
+}
+
+function markChanged() {
+  const group = SCHEMA?.[openAgent];
+  if (!group) return;
+  for (const field of group.fields) {
+    const input = $(fieldId(field.name));
+    if (!input) continue;
+    const changed = String(readField(field)) !== String(VALUES[field.name]);
+    input.closest(".fld").classList.toggle("changed", changed);
   }
-  for (const trade of trades) {
-    const row = document.createElement("tr");
-    const tokenCell = document.createElement("td");
-    const label = trade.symbol || trade.name || shortMint(trade.mint);
-    tokenCell.append(tokenReference(label, trade, "trade-token token-link"));
-    if (isSyntheticToken(trade) || hasTokenName(trade)) {
-      const mint = document.createElement("span");
-      mint.className = "trade-mint";
-      mint.textContent = isSyntheticToken(trade) ? "DEMO" : shortMint(trade.mint);
-      tokenCell.append(isSyntheticToken(trade) ? mint : tokenReference(mint.textContent, trade, "trade-mint token-link"));
+}
+
+function buildField(field) {
+  const label = el("div", { class: "fldLabel", text: field.label });
+  const inputWrap = el("div", { class: "fldIn" });
+
+  if (field.type === "bool") {
+    const toggle = el("label", { class: "sw" });
+    const input = el("input", { attrs: { type: "checkbox", id: fieldId(field.name) } });
+    input.checked = Boolean(VALUES[field.name]);
+    input.addEventListener("change", markChanged);
+    toggle.append(input, el("span", {}));
+    inputWrap.append(toggle);
+  } else if (field.type === "enum") {
+    const select = el("select", { attrs: { id: fieldId(field.name) } });
+    for (const option of field.options ?? []) {
+      const node = el("option", { text: option, attrs: { value: option } });
+      if (option === VALUES[field.name]) node.selected = true;
+      select.append(node);
     }
-
-    const entryCell = mcCell(trade.entryMarketCapUsd, trade.openedAt ? t("trade.openedAt", { time: fmtClock(trade.openedAt) }) : "");
-    const exitCell = mcCell(trade.exitMarketCapUsd, trade.closedAt ? t("trade.closedAt", { time: fmtClock(trade.closedAt) }) : "");
-
-    const reasonCell = document.createElement("td");
-    reasonCell.className = "exit-reason";
-    const reason = String(trade.reason ?? "exit");
-    const reasonLabel = t(`exit.${reason}`);
-    reasonCell.textContent = reasonLabel === `exit.${reason}` ? reason.replaceAll("-", " ") : reasonLabel;
-    if (trade.openedAt && trade.closedAt) {
-      const held = document.createElement("span");
-      held.className = "trade-mint";
-      held.textContent = t("trade.held", { duration: fmtDuration(trade.closedAt - trade.openedAt) });
-      reasonCell.append(held);
-    }
-
-    const pnlCell = document.createElement("td");
-    const pnl = Number(trade.pnlSol ?? 0);
-    pnlCell.className = signClass(pnl);
-    pnlCell.textContent = fmtSolSigned(pnl, 4);
-    const cost = Number(trade.costSol);
-    if (Number.isFinite(cost) && cost > 0) {
-      const pct = document.createElement("span");
-      pct.className = "trade-mint";
-      pct.textContent = `${pnl >= 0 ? "+" : ""}${((pnl / cost) * 100).toFixed(1)}%`;
-      pnlCell.append(pct);
-    }
-    row.append(tokenCell, entryCell, exitCell, reasonCell, pnlCell);
-    body.append(row);
-  }
-}
-
-// ---------- the plain-language story ----------
-// Nodes are keyed by timestamp+message so an unchanged line keeps its DOM node and does not
-// replay its enter animation on the next one-second refresh.
-const storyNodes = new Map();
-
-function buildStoryRow() {
-  const row = document.createElement("div");
-  row.className = "story-row";
-  const icon = document.createElement("span");
-  icon.className = "story-icon";
-  const body = document.createElement("div");
-  body.className = "story-body";
-  const text = document.createElement("span");
-  text.className = "story-text";
-  const meta = document.createElement("span");
-  meta.className = "story-meta";
-  const botTag = document.createElement("span");
-  botTag.className = "story-lane";
-  const time = document.createElement("span");
-  time.className = "story-time";
-  meta.append(botTag, time);
-  body.append(text, meta);
-  row.append(icon, body);
-  return { row, icon, text, botTag, time };
-}
-
-function fillStoryRow(refs, entry) {
-  const { item, timestamp } = entry;
-  refs.row.className = `story-row tone-${item.tone ?? "info"}`;
-  refs.icon.textContent = item.icon ?? "·";
-  refs.text.textContent = t(item.key, item.params);
-  refs.time.textContent = fmtClock(timestamp);
-  if (item.bot) {
-    refs.botTag.textContent = t(`bot.${item.bot}.badge`);
-    refs.botTag.classList.remove("hidden");
-    refs.botTag.dataset.bot = item.bot;
+    select.addEventListener("change", markChanged);
+    inputWrap.append(select);
   } else {
-    refs.botTag.textContent = "";
-    refs.botTag.classList.add("hidden");
+    const input = el("input", {
+      attrs: {
+        type: "number", id: fieldId(field.name),
+        ...(field.min !== undefined ? { min: field.min } : {}),
+        ...(field.max !== undefined ? { max: field.max } : {}),
+        step: field.step ?? "any",
+      },
+    });
+    input.value = String(VALUES[field.name]);
+    input.addEventListener("input", markChanged);
+    inputWrap.append(input);
+    if (field.unit) inputWrap.append(el("span", { class: "u", text: field.unit }));
+  }
+
+  return el("div", { class: "fld" }, [
+    el("div", { class: "fldTop" }, [label, inputWrap]),
+    field.help ? el("div", { class: "fldHelp", text: field.help }) : null,
+  ]);
+}
+
+async function openSettings(agent) {
+  openAgent = agent;
+  $("mMsg").className = "sheetMsg";
+  $("mMsg").textContent = "";
+  $("mSave").disabled = false;
+  replace($("mBody"), emptyNote("loading…"));
+  $("modal").hidden = false;
+
+  try {
+    if (!SCHEMA) await loadSettings();
+    const group = SCHEMA[agent];
+    if (!group) throw new Error("this agent has no settings");
+    $("mTitle").textContent = `${group.title} settings`;
+    $("mBlurb").textContent = group.blurb ?? "";
+    replace($("mBody"), ...group.fields.map(buildField));
+    $("mClose").focus();
+  } catch (error) {
+    replace($("mBody"), emptyNote(error.message));
   }
 }
 
-function renderStory(logs = []) {
-  const container = $("#storyList");
-  if (!container) return;
-  const entries = [];
-  for (const line of Array.isArray(logs) ? logs : []) {
-    const item = humanizeLog(line.message);
-    if (!item) continue;
-    entries.push({ key: `${line.timestamp}|${line.message}`, timestamp: line.timestamp, item });
-    if (entries.length >= 40) break;
-  }
+function closeSettings() {
+  $("modal").hidden = true;
+  openAgent = null;
+}
 
-  if (!entries.length) {
-    storyNodes.clear();
-    container.replaceChildren(emptyState("activity.empty"));
+async function saveSettings() {
+  const group = SCHEMA?.[openAgent];
+  if (!group) return;
+
+  const changes = {};
+  for (const field of group.fields) {
+    const value = readField(field);
+    if (String(value) !== String(VALUES[field.name])) changes[field.name] = value;
+  }
+  if (!Object.keys(changes).length) {
+    $("mMsg").className = "sheetMsg";
+    $("mMsg").textContent = "nothing changed";
     return;
   }
 
-  const fragment = document.createDocumentFragment();
-  const liveKeys = new Set();
-  for (const entry of entries) {
-    liveKeys.add(entry.key);
-    let refs = storyNodes.get(entry.key);
-    if (!refs) {
-      refs = buildStoryRow();
-      storyNodes.set(entry.key, refs);
-      if (storyPrimed) markNew(refs.row);
-    }
-    fillStoryRow(refs, entry);
-    fragment.append(refs.row);
-  }
-  for (const key of [...storyNodes.keys()]) if (!liveKeys.has(key)) storyNodes.delete(key);
-  container.replaceChildren(fragment);
-  storyPrimed = true;
-}
-
-// Raw, untranslated lines: the escape hatch for whoever can read them.
-function renderTechnicalLog(logs = [], debug = []) {
-  const container = $("#logList");
-  if (!container) return;
-  const combined = [
-    ...(Array.isArray(logs) ? logs.map((item) => ({ timestamp: item.timestamp, message: item.message, level: "" })) : []),
-    ...(Array.isArray(debug) ? debug.map((item) => ({ timestamp: item.timestamp, message: item.message, level: item.level })) : []),
-  ];
-  const unique = new Map();
-  for (const entry of combined) unique.set(`${entry.timestamp}|${entry.message}`, entry);
-  const rows = [...unique.values()]
-    .sort((a, b) => new Date(b.timestamp).valueOf() - new Date(a.timestamp).valueOf())
-    .slice(0, 120);
-
-  container.replaceChildren();
-  if (!rows.length) {
-    container.append(emptyState("activity.technicalEmpty"));
-    return;
-  }
-  for (const item of rows) {
-    const row = document.createElement("div");
-    row.className = "log-row";
-    const time = document.createElement("span");
-    time.className = "log-time";
-    time.textContent = fmtClock(item.timestamp);
-    const text = document.createElement("span");
-    text.className = "log-message";
-    text.textContent = item.message;
-    const message = String(item.message ?? "");
-    if (item.level === "error" || /error|exception|gagal|stderr/i.test(message)) text.classList.add("error");
-    else if (message.includes("[bot3] BUY")) text.classList.add("buy");
-    else if (message.includes("[bot3] SELL")) text.classList.add("exit");
-    else if (message.includes("[bot2] GREEN")) text.classList.add("launch");
-    row.append(time, text);
-    container.append(row);
+  $("mSave").disabled = true;
+  $("mMsg").className = "sheetMsg";
+  $("mMsg").textContent = "saving…";
+  try {
+    const result = await postJson("/api/settings", { settings: changes });
+    VALUES = result.values ?? { ...VALUES, ...changes };
+    pendingRestart = Boolean(result.pendingRestart);
+    $("mMsg").className = "sheetMsg good";
+    $("mMsg").textContent = result.applied
+      ? `Saved ${result.changed} setting(s); the desk picked them up.`
+      : `Saved ${result.changed} setting(s). They apply on the next Start.`;
+    markChanged();
+    await tick();
+  } catch (error) {
+    $("mMsg").className = "sheetMsg bad";
+    $("mMsg").textContent = error.message;
+  } finally {
+    $("mSave").disabled = false;
   }
 }
 
-function renderStartupDiagnostics(runtime = {}, logs = [], screener = {}) {
-  const title = $("#startupTitle");
-  const badge = $("#startupBadge");
-  const message = $("#startupMessage");
-  const events = $("#startupEvents");
-  if (!title || !badge || !message || !events) return;
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(".agico[data-agent]");
+  if (button) openSettings(button.dataset.agent);
+});
+$("mClose").addEventListener("click", closeSettings);
+$("mCancel").addEventListener("click", closeSettings);
+$("mSave").addEventListener("click", saveSettings);
+$("modal").addEventListener("click", (event) => {
+  if (event.target.id === "modal") closeSettings();
+});
+addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("modal").hidden) closeSettings();
+});
 
-  const serverErrors = (Array.isArray(logs) ? logs : []).filter((item) =>
-    /\[start error\]|\[worker stderr\]|\[worker error\]|\[feed\].*(error|failed|unauthorized|\b40[13]\b|timed out|ECONN|ENOTFOUND|EAI_AGAIN|refused|reset|closed)|exception|gagal/i.test(String(item.message ?? "")),
-  );
-  const newestServerError = serverErrors[0]?.message;
-  const newestClientError = clientDiagnostics.find((entry) => entry.level === "error")?.message;
-  // The scout is seeing coins but the filter cannot judge any of them: that means the market data
-  // is not arriving, which looks identical to "nothing is pumping" unless it is called out.
-  const bot1 = screener.bots?.scout ?? {};
-  const bot2 = screener.bots?.filter ?? {};
-  const waitingForData = Number(bot2.categories?.no_data ?? 0);
-  const dataMissing = runtime.status === "running"
-    && runtime.feedConnected
-    && Number(bot1.coins ?? 0) >= 20
-    && Number(bot2.judged ?? 0) > 0
-    && Number(bot2.passed ?? 0) + Number(bot2.killed ?? 0) === 0
-    && waitingForData >= 10;
-
-  let titleKey = "startup.ready";
-  let badgeKey = "startup.readyBadge";
-  let messageKey = "startup.readyMessage";
-  let rawMessage = "";
-  let level = "";
-
-  if (runtime.status === "error") {
-    titleKey = "startup.errorTitle";
-    badgeKey = "startup.errorBadge";
-    messageKey = "startup.errorMessage";
-    rawMessage = newestServerError || newestClientError || "";
-    level = "error";
-  } else if (runtime.status === "starting") {
-    titleKey = "startup.startingTitle";
-    badgeKey = "startup.startingBadge";
-    messageKey = "startup.startingMessage";
-  } else if (runtime.status === "stopping") {
-    titleKey = "startup.stoppingTitle";
-    badgeKey = "startup.stoppingBadge";
-    messageKey = "startup.stoppingMessage";
-  } else if (dataMissing) {
-    titleKey = "startup.dataMissingTitle";
-    badgeKey = "startup.dataMissingBadge";
-    messageKey = "startup.dataMissingMessage";
-    level = "warning";
-  } else if (runtime.status === "running" && runtime.feedConnected) {
-    titleKey = "startup.liveTitle";
-    badgeKey = "startup.liveBadge";
-    messageKey = "startup.liveMessage";
-  } else if (runtime.status === "running") {
-    titleKey = "startup.feedTitle";
-    badgeKey = "startup.feedBadge";
-    messageKey = "startup.feedMessage";
-    rawMessage = newestServerError || "";
-    level = newestServerError ? "error" : "warning";
-  } else if (newestClientError) {
-    titleKey = "startup.uiErrorTitle";
-    badgeKey = "startup.uiErrorBadge";
-    messageKey = "";
-    rawMessage = newestClientError;
-    level = "error";
-  } else if (newestServerError) {
-    titleKey = "startup.errorTitle";
-    badgeKey = "startup.errorBadge";
-    messageKey = "";
-    rawMessage = newestServerError;
-    level = "error";
-  }
-
-  setText(title, t(titleKey));
-  setText(badge, t(badgeKey));
-  badge.classList.toggle("startup-error", level === "error");
-  badge.classList.toggle("startup-warning", level === "warning");
-  setText(message, [messageKey ? t(messageKey) : "", rawMessage].filter(Boolean).join(" — "));
-  message.classList.toggle("error", level === "error");
-  message.classList.toggle("warning", level === "warning");
-
-  const combined = [
-    ...clientDiagnostics,
-    ...(Array.isArray(logs) ? logs.map((item) => ({ timestamp: item.timestamp, level: "", message: item.message })) : []),
-  ];
-  const unique = new Map();
-  for (const entry of combined) unique.set(`${entry.timestamp}|${entry.message}`, entry);
-  const recent = [...unique.values()]
-    .sort((a, b) => new Date(b.timestamp).valueOf() - new Date(a.timestamp).valueOf())
-    .slice(0, 10);
-
-  events.replaceChildren();
-  if (!recent.length) {
-    events.append(emptyState("startup.eventsEmpty"));
-    return;
-  }
-  for (const entry of recent) {
-    const row = document.createElement("div");
-    const isError = entry.level === "error" || /error|failed|gagal|unauthorized|exception/i.test(String(entry.message ?? ""));
-    row.className = `screener-debug-row ${isError ? "error" : "info"}`;
-    const time = document.createElement("span");
-    time.className = "log-time";
-    time.textContent = fmtClock(entry.timestamp);
-    const text = document.createElement("span");
-    text.className = "screener-debug-message";
-    text.textContent = entry.message || "";
-    row.append(time, text);
-    events.append(row);
-  }
-}
-
-// The candidate list: what the analyst scored at or above the pass mark, and what the executor is
-// doing about each one.
-function renderScreener(status = {}, runtime = {}) {
-  const bots = status.bots ?? {};
-  const filter = bots.filter ?? {};
-  const analyst = bots.analyst ?? {};
-  const executor = bots.executor ?? {};
-  const screener = bots.scout ?? {};
-  const greenList = Array.isArray(analyst.candidates) ? analyst.candidates : [];
-
-  let phaseKey = "screener.stopped";
-  if (runtime.status === "starting") phaseKey = "screener.starting";
-  else if (runtime.status === "stopping") phaseKey = "screener.stopping";
-  else if (runtime.status === "error") phaseKey = "screener.error";
-  else if (runtime.status === "running") phaseKey = runtime.feedConnected ? "screener.live" : "screener.waitingFeed";
-  const phase = $("#screenerState");
-  setText(phase, t(phaseKey));
-  phase.classList.toggle("error", runtime.status === "error");
-  phase.classList.toggle("active", runtime.status === "running" && Boolean(runtime.feedConnected));
-
-  setNumber($("#screenerActiveCount"), analyst.passingNow ?? 0, fmtInt);
-  setText($("#screenerCapacity"), fmtInt(analyst.passScore ?? 70));
-  setNumber($("#statScreened"), screener.coins ?? 0, fmtInt);
-  setNumber($("#statPerMinute"), screener.newPerMinute ?? 0, fmtInt);
-  setNumber($("#statRejected"), bots.logger?.kills ?? 0, fmtInt);
-  setNumber($("#statBought"), executor.entries ?? 0, fmtInt);
-  if (typeof renderFunnel === "function") renderFunnel(status);
-
-  // What the executor is doing with each candidate, keyed by mint.
-  const bot3State = new Map();
-  for (const position of Array.isArray(executor.positions) ? executor.positions : []) {
-    bot3State.set(position.mint, { text: t("bot3.holding"), className: "positive" });
-  }
-  for (const coin of Array.isArray(executor.watching) ? executor.watching : []) {
-    if (!bot3State.has(coin.mint)) bot3State.set(coin.mint, { text: waitingText(coin), className: "" });
-  }
-
-  const body = $("#screenerBody");
-  body.replaceChildren();
-  if (!greenList.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 6;
-    cell.className = "empty-cell";
-    cell.textContent = t(Number(screener.coins ?? 0) ? "screener.emptyScreening" : "screener.empty");
-    row.append(cell);
-    body.append(row);
-    return;
-  }
-
-  for (const coin of greenList) {
-    const row = document.createElement("tr");
-
-    const tokenCell = document.createElement("td");
-    const label = coin.symbol || shortMint(coin.mint);
-    tokenCell.append(tokenReference(label, coin, "trade-token token-link"));
-    if (coin.symbol) {
-      tokenCell.append(tokenReference(shortMint(coin.mint), coin, "trade-mint token-link"));
-    }
-
-    const ageCell = document.createElement("td");
-    ageCell.textContent = Number.isFinite(coin.ageSeconds) ? fmtDuration(coin.ageSeconds * 1000) : "—";
-
-    const scoreCell = document.createElement("td");
-    scoreCell.className = "candidate-stage";
-    const scoreHead = document.createElement("span");
-    scoreHead.className = "stage-head";
-    scoreHead.textContent = fmtScore(coin.score);
-    const scoreWhy = document.createElement("span");
-    scoreWhy.className = "stage-detail";
-    scoreWhy.textContent = leadText(coin.lead);
-    scoreCell.append(scoreHead, scoreWhy);
-
-    const surgeCell = document.createElement("td");
-    surgeCell.textContent = measuredText(coin);
-
-    const mcCellEl = document.createElement("td");
-    mcCellEl.textContent = fmtUsdExact(coin.marketCapUsd);
-
-    const stateCell = document.createElement("td");
-    stateCell.className = "candidate-stage";
-    const state = bot3State.get(coin.mint) ?? { text: t("bot3.notWatching"), className: "" };
-    const stateText = document.createElement("span");
-    stateText.className = `stage-head ${state.className}`.trim();
-    stateText.textContent = state.text;
-    stateCell.append(stateText);
-
-    row.append(tokenCell, ageCell, scoreCell, surgeCell, mcCellEl, stateCell);
-    body.append(row);
-  }
-}
-
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
+/* ------------------------------------------------------------------ tick */
+async function tick() {
   try {
     const response = await fetch("/api/state", { cache: "no-store" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Could not read state.");
-    const nextSnapshot = JSON.stringify(data.settings);
-    if (nextSnapshot !== settingsSnapshot) {
-      applySettings(data.settings);
-      settingsSnapshot = nextSnapshot;
-    }
-    lastRuntimeSnapshot = data.runtime;
-    lastServerLogs = data.logs;
-    lastScreenerSnapshot = data.screener;
-    lastScreenerDebug = data.screenerDebug;
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const state = await response.json();
+    latest = state;
+    $("error").textContent = "";
 
-    setRuntime(data.runtime);
-    renderNowHeadline(data.runtime, data.screener);
-    renderStory(data.logs);
-    renderTechnicalLog(data.logs, data.screenerDebug);
-    renderBotCards(data.screener, data.runtime);
-    renderAccount(data.account, data.settings);
-    renderStartupDiagnostics(data.runtime, data.logs, data.screener);
-    renderScreener(data.screener, data.runtime);
+    const running = state.runtime?.status === "running";
+    const connected = Boolean(state.runtime?.feedConnected);
+    $("status").className = `badge ${running ? (connected ? "live" : "warn") : ""}`.trim();
+    $("statusText").textContent = running ? (connected ? "live" : "starting") : "stopped";
+
+    const updated = state.screener?.updatedAt;
+    const age = updated ? Math.round((Date.now() - Date.parse(updated)) / 1000) : null;
+    $("meta").textContent = [
+      state.runtime?.mode ? `${state.runtime.mode} mode` : "",
+      age === null ? "" : `${age}s ago`,
+    ].filter(Boolean).join(" · ");
+
+    renderControls(state);
+    renderKpis(state);
+    renderChart(state);
+    renderAgents(state);
+    renderFunnel(state);
+    renderKills(state);
+    renderClosed(state);
+    renderNear(state);
+    renderFeed(state);
+
+    $("footer").textContent = `updated ${hhmm(Date.now())} · ${(state.screenerDebug ?? []).length} event(s) in the log · paper mode · refreshes every 2s`;
   } catch (error) {
-    addClientDiagnostic("error", `Could not read the dashboard server: ${error.message}`);
-    showMessage("msg.readError", { detail: error.message }, true);
-  } finally {
-    refreshing = false;
+    $("error").textContent = `dashboard: ${error.message}`;
   }
 }
 
-strategyForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (currentRuntimeStatus === "running") {
-    await applyLiveSettings();
-    return;
-  }
-  clientDiagnostics = clientDiagnostics.filter((entry) => entry.level !== "error");
-  showMessage("msg.starting");
-  const button = $("#startButton");
-  button.disabled = true;
-  try {
-    await postJson("/api/start", { apiKey: $("#apiKey").value, settings: collectSettings() });
-    $("#apiKey").value = "";
-    showMessage("msg.started");
-    await refresh();
-  } catch (error) {
-    addClientDiagnostic("error", `Start failed in the browser: ${error.message}`);
-    showRawMessage(error.message);
-  } finally {
-    button.disabled = false;
-    await refresh();
-  }
+tick();
+setInterval(tick, 2000);
+addEventListener("resize", () => {
+  if (latest) renderChart(latest);
 });
-
-async function applyLiveSettings() {
-  const button = $("#applySettingsButton");
-  button.disabled = true;
-  showMessage("msg.applying");
-  try {
-    await postJson("/api/settings", { settings: collectSettings() });
-    showMessage("msg.applied");
-    await refresh();
-  } catch (error) {
-    showRawMessage(error.message);
-  } finally {
-    button.disabled = false;
-    await refresh();
-  }
-}
-
-$("#applySettingsButton").addEventListener("click", applyLiveSettings);
-
-$("#stopButton").addEventListener("click", async () => {
-  try {
-    await postJson("/api/stop");
-    showMessage("msg.stopping");
-    await refresh();
-  } catch (error) {
-    showRawMessage(error.message);
-  }
-});
-
-$("#closeAllButton").addEventListener("click", () => closePositions(null));
-
-$("#resetButton").addEventListener("click", async () => {
-  const balance = Number(strategyForm.elements.namedItem("paperStartBalanceSol").value);
-  if (!window.confirm(t("msg.resetConfirm", { balance }))) return;
-  try {
-    await postJson("/api/reset-account", { balanceSol: balance });
-    showMessage("msg.reset");
-    await refresh();
-  } catch (error) {
-    showRawMessage(error.message);
-  }
-});
-
-applyStaticText();
-syncLangButtons();
-syncThemeButtons();
-setupNav();
-refresh();
-setInterval(refresh, 1000);

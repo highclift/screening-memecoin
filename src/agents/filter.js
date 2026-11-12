@@ -110,7 +110,11 @@ export function createFilter({ config, universe, devBook, rugcheck, logger, onPa
   function countKill(record, reason, now) {
     stats.killed += 1;
     categories[reason.category] = (categories[reason.category] ?? 0) + 1;
-    logger.kill("filter", record, reason, now);
+    const written = logger.kill("filter", record, reason, now);
+    // The dashboard's filter row is otherwise the one place in the chain with nothing to show: it
+    // is almost always killing something, and the reason is the interesting part. Only the kills
+    // the journal actually wrote are told, so the repeat-suppression applies here too.
+    if (written) logger.tell("filtered", `${reason.category} — ${reason.detail}`, record?.mint ?? "");
   }
 
   // ---------- RugCheck, asked for lazily and cached on the record ----------

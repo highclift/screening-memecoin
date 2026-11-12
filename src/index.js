@@ -66,8 +66,24 @@ function note(level, message, mint = "") {
   }
 }
 
+// A failed save must never take the desk down with it. This runs on a 15s timer and after every
+// fill, so an exception escaping it killed the whole process — including any open position, which
+// then sat unmanaged with no stop until somebody noticed. The account is still in memory and the
+// next save is 15 seconds away, so the honest response to a failed write is to say so and carry
+// on. Consecutive failures are counted, because one is noise and a run of them is a real problem.
+let failedSaves = 0;
+
 function persist() {
-  saveState(account);
+  try {
+    saveState(account);
+    if (failedSaves > 0) {
+      log(`[state] Paper account saved again after ${failedSaves} failed attempt(s).`);
+      failedSaves = 0;
+    }
+  } catch (error) {
+    failedSaves += 1;
+    log(`[state] Could not save the paper account (${error.code ?? error.message}); keeping it in memory and retrying in 15s. Failed ${failedSaves} time(s) in a row.`);
+  }
 }
 
 const logger = createLogger({ journals, maxTracked: config.maxUniverseTokens, log, note });
@@ -250,8 +266,12 @@ function onParentMessage(message) {
 
   if (message.type !== "update-settings" || !message.settings) return;
   try {
-    config = loadConfig({ ...process.env, ...message.settings, MODE: "paper", PUMPPORTAL_API_KEY: config.apiKey });
-    log("[settings] Batas uang diperbarui tanpa restart bot.");
+    const next = loadConfig({ ...process.env, ...message.settings, MODE: "paper", PUMPPORTAL_API_KEY: config.apiKey });
+    // Every agent was handed THIS object and reads its fields as it works, so the new values have
+    // to be copied into it. Rebinding `config` here would leave all six agents holding the old
+    // one, and the change would be accepted, logged, and then quietly have no effect.
+    Object.assign(config, next);
+    log(`[settings] ${Object.keys(message.settings).length} setting(s) updated without a restart.`);
     if (process.send) process.send({ type: "settings-applied" });
   } catch (error) {
     log(`[settings error] ${error.message}`);

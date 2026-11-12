@@ -91,7 +91,7 @@ export function createRisk({ config, account, logger, persist }) {
       } else if (config.maxDailyLossSol > 0 && account.daily.realizedPnlSol <= -config.maxDailyLossSol) {
         reason = `batas rugi harian ${config.maxDailyLossSol} SOL`;
       } else if (sizeSol() < config.minPositionSol) {
-        reason = "saldo paper tidak cukup";
+        reason = "not enough paper balance";
       }
 
       if (!reason) {
@@ -105,7 +105,7 @@ export function createRisk({ config, account, logger, persist }) {
         lastBlock = reason;
         stats.blocked += 1;
         logger.kill("risk", record, { category: "money_limit", detail: reason }, now);
-        logger.tell("blocked", `Entry tertahan: ${reason}; koin tetap dipantau.`, record?.mint ?? "");
+        logger.tell("blocked", `Entry blocked: ${reason}; the coin stays watched.`, record?.mint ?? "");
       }
       return reason;
     },

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./src/config.js";
+import { envOverrides, publicSchema, shownValues } from "./src/settings.js";
 import { freshState } from "./src/state.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -14,28 +15,14 @@ const PORT = Number(process.env.WEB_PORT ?? 3000);
 const HOST = "127.0.0.1";
 const app = express();
 
-// Money limits are the only settings the dashboard asks for. The window, the kill list and the
-// pass mark are the desk's definition of itself and live in .env, not in a form.
-const DEFAULT_SETTINGS = {
-  paperStartBalanceSol: 1,
-  positionPct: 0.08,
-  maxOpenPositions: 3,
-  maxEntriesPerDay: 20,
-  maxDailyLossSol: 0.05,
-};
-
-const SETTINGS_TO_ENV = {
-  paperStartBalanceSol: "PAPER_START_BALANCE_SOL",
-  positionPct: "POSITION_PCT",
-  maxOpenPositions: "MAX_OPEN_POSITIONS",
-  maxEntriesPerDay: "MAX_ENTRIES_PER_DAY",
-  maxDailyLossSol: "MAX_DAILY_LOSS_SOL",
-};
-
-// Fill realism, env-only (PAPER_FEE_BPS / PAPER_SLIPPAGE_BPS): the same numbers the worker uses to
-// value an open position.
-const FEE_BPS = Number(process.env.PAPER_FEE_BPS ?? 100);
-const SLIPPAGE_BPS = Number(process.env.PAPER_SLIPPAGE_BPS ?? 200);
+// What the dashboard may change lives in src/settings.js, grouped by the agent that reads it; the
+// defaults and every range check stay in src/config.js. This file only holds the OVERRIDES the
+// dashboard has saved this session, as env strings, and layers them over process.env.
+//
+// They are deliberately not written to disk: .env is the user's file, and a form quietly rewriting
+// it is worse than a setting that resets when the dashboard restarts.
+let settingOverrides = {};
+let pendingRestart = false;
 
 let worker = null;
 let workerStatus = "stopped";
@@ -43,8 +30,19 @@ let feedConnected = false;
 let activeDataSource = "pumpportal";
 let feedSource = null;
 let sessionApiKey = "";
-let activeSettings = { ...DEFAULT_SETTINGS };
 const recentLogs = [];
+
+const envWith = (overrides = settingOverrides, apiKey = sessionApiKey || configuredApiKey()) => ({
+  ...process.env,
+  ...overrides,
+  MODE: "paper",
+  BOT_FEED_MODE: activeDataSource,
+  PUMPPORTAL_API_KEY: apiKey,
+});
+
+// The config the desk is running on, or would run on if it were started now. Rebuilt whenever the
+// overrides change, so /api/state can describe the desk without asking the worker.
+let activeConfig = loadConfig(envWith({}, ""));
 
 // What the three bots report. Empty until the worker publishes its first status.
 const emptyStatus = () => ({ bots: null, updatedAt: null });
@@ -61,16 +59,16 @@ app.use(express.json({ limit: "16kb" }));
 
 app.use((req, res, next) => {
   const allowedHosts = new Set(["127.0.0.1", "localhost"]);
-  if (!allowedHosts.has(req.hostname)) return res.status(403).json({ error: "Dashboard hanya menerima koneksi lokal." });
+  if (!allowedHosts.has(req.hostname)) return res.status(403).json({ error: "The dashboard accepts local connections only." });
 
   const origin = req.get("origin");
   if (origin) {
     try {
       if (!allowedHosts.has(new URL(origin).hostname)) {
-        return res.status(403).json({ error: "Origin request tidak diizinkan." });
+        return res.status(403).json({ error: "That request origin is not allowed." });
       }
     } catch {
-      return res.status(403).json({ error: "Origin request tidak valid." });
+      return res.status(403).json({ error: "That request origin is not valid." });
     }
   }
   next();
@@ -97,22 +95,52 @@ function addScreenerDebug(level, message, timestamp = new Date().toISOString()) 
   screenerStatus = { ...screenerStatus, updatedAt: timestamp };
 }
 
+// The paper account, cached for a beat.
+//
+// Every open dashboard polls /api/state, and this used to read and parse the whole file on each
+// one. Two costs: the obvious one, and a sharper one on Windows — the worker saves by renaming a
+// temp file over this path, and Windows refuses a rename while another process has the
+// destination open. A read in flight at the wrong moment made the worker's save fail, which
+// killed it. The worker only writes every 15 seconds, so holding the parse for one second is
+// free, and it cuts the number of open handles by however many pollers there are.
+const STATE_CACHE_MS = 1000;
+let cachedPaperState = null;
+let cachedPaperStateAt = 0;
+
 function readPaperState() {
+  const now = Date.now();
+  if (cachedPaperState && now - cachedPaperStateAt < STATE_CACHE_MS) return cachedPaperState;
+
   try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    cachedPaperState = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    cachedPaperStateAt = now;
   } catch {
-    return {
-      balanceSol: activeSettings.paperStartBalanceSol,
-      positions: {},
-      closedTrades: [],
-      daily: { day: new Date().toISOString().slice(0, 10), entries: 0, realizedPnlSol: 0 },
-    };
+    // A read that lands in the instant between the worker's write and its rename sees no file at
+    // all. Showing the last good account is right; showing a fresh one would flash a full balance
+    // and no positions onto the dashboard for a second, which reads as the desk having been reset.
+    if (!cachedPaperState) {
+      cachedPaperState = {
+        balanceSol: activeConfig.paperStartBalanceSol,
+        startBalanceSol: activeConfig.paperStartBalanceSol,
+        positions: {},
+        closedTrades: [],
+        daily: { day: new Date().toISOString().slice(0, 10), entries: 0, realizedPnlSol: 0 },
+      };
+    }
   }
+  return cachedPaperState;
 }
 
+// The account changed underneath the cache (a reset writes the file directly).
+function invalidatePaperState() {
+  cachedPaperStateAt = 0;
+}
+
+// Fill realism, from the SAME config the worker is running on, so an open position is valued here
+// exactly as the worker would value it.
 function positionSnapshot(position) {
-  const fee = FEE_BPS / 10_000;
-  const slippage = SLIPPAGE_BPS / 10_000;
+  const fee = activeConfig.paperFeeBps / 10_000;
+  const slippage = activeConfig.paperSlippageBps / 10_000;
   const estimate = position.tokenQuantity * position.lastPrice * (1 - slippage) * (1 - fee);
   return {
     mint: position.mint,
@@ -142,9 +170,18 @@ function sendState(res) {
       screenerDiagnosticsVersion: 2,
       hasApiKey: Boolean(sessionApiKey || configuredApiKey()),
     },
-    settings: activeSettings,
+    // The handful the dashboard reads directly for the rail and the tiles. Everything else it
+    // needs about the configuration it gets from /api/settings.
+    settings: {
+      paperStartBalanceSol: activeConfig.paperStartBalanceSol,
+      positionPct: activeConfig.positionPct,
+      maxOpenPositions: activeConfig.maxOpenPositions,
+      maxEntriesPerDay: activeConfig.maxEntriesPerDay,
+      maxDailyLossSol: activeConfig.maxDailyLossSol,
+    },
     account: {
-      balanceSol: Number(paper.balanceSol ?? activeSettings.paperStartBalanceSol),
+      balanceSol: Number(paper.balanceSol ?? activeConfig.paperStartBalanceSol),
+      startBalanceSol: Number(paper.startBalanceSol ?? activeConfig.paperStartBalanceSol),
       realizedPnlSol: Number(paper.daily?.realizedPnlSol ?? 0),
       entriesToday: Number(paper.daily?.entries ?? 0),
       openPositions: positions,
@@ -156,54 +193,39 @@ function sendState(res) {
   });
 }
 
-function parseSettings(input = {}) {
-  const settings = { ...DEFAULT_SETTINGS };
-  for (const [name, fallback] of Object.entries(DEFAULT_SETTINGS)) {
-    const value = input[name] ?? fallback;
-    if (typeof value !== "number" && typeof value !== "string") throw new Error(`${name} must be a number.`);
-    settings[name] = Number(value);
-    if (!Number.isFinite(settings[name])) throw new Error(`${name} must be a valid number.`);
-  }
-  return settings;
-}
-
-function envForSettings(settings, apiKey, dataSource = activeDataSource) {
-  const env = { ...process.env, MODE: "paper", BOT_FEED_MODE: dataSource, PUMPPORTAL_API_KEY: apiKey };
-  for (const [name, envName] of Object.entries(SETTINGS_TO_ENV)) env[envName] = String(settings[name]);
-  return env;
-}
-
-function settingsForWorker(settings) {
-  return Object.fromEntries(
-    Object.entries(SETTINGS_TO_ENV).map(([name, envName]) => [envName, String(settings[name])]),
-  );
-}
-
 app.get("/api/state", (_req, res) => sendState(res));
 
+app.get("/api/settings", (_req, res) => {
+  res.json({
+    schema: publicSchema(),
+    values: shownValues(activeConfig),
+    pendingRestart,
+    running: Boolean(worker) && ["starting", "running"].includes(workerStatus),
+  });
+});
+
 app.post("/api/start", (req, res) => {
-  if (worker) return res.status(409).json({ error: "Bot sudah berjalan atau sedang berhenti." });
+  if (worker) return res.status(409).json({ error: "The desk is already running, or still stopping." });
 
   recentLogs.length = 0;
   screenerDebug.length = 0;
   screenerStatus = { ...emptyStatus(), phase: "starting" };
-  addLog("[debug] Permintaan start diterima dashboard.");
-  addScreenerDebug("info", "Permintaan start diterima; memvalidasi strategi dan membuat worker paper.");
+  addLog("[debug] Start requested from the dashboard.");
+  addScreenerDebug("info", "Start requested; checking the settings and forking the paper worker.");
   try {
-    const settings = parseSettings(req.body?.settings);
     const dataSource = "pumpportal";
     const submittedKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
     const apiKey = submittedKey || configuredApiKey();
-    const childEnv = envForSettings(settings, apiKey, dataSource);
-    loadConfig(childEnv);
+    const childEnv = envWith(settingOverrides, apiKey);
+    activeConfig = loadConfig(childEnv);
+    pendingRestart = false;
 
-    activeSettings = settings;
     activeDataSource = dataSource;
     feedSource = dataSource;
     sessionApiKey = apiKey;
     feedConnected = false;
     workerStatus = "starting";
-    addLog("Memulai scanner paper trading…");
+    addLog("Starting the paper desk…");
     worker = fork(BOT_PATH, [], {
       cwd: ROOT,
       env: childEnv,
@@ -213,8 +235,8 @@ app.post("/api/start", (req, res) => {
     let stderrBuffer = "";
 
     child.on("spawn", () => {
-      addLog(`[debug] Bot worker berjalan (pid ${child.pid ?? "unknown"}).`);
-      addScreenerDebug("info", `Worker aktif (pid ${child.pid ?? "unknown"}); menunggu inisialisasi sumber data.`);
+      addLog(`[debug] Worker running (pid ${child.pid ?? "unknown"}).`);
+      addScreenerDebug("info", `Worker up (pid ${child.pid ?? "unknown"}); waiting for the data sources.`);
     });
     child.stderr?.on("data", (chunk) => {
       stderrBuffer += chunk.toString();
@@ -244,14 +266,14 @@ app.post("/api/start", (req, res) => {
         feedConnected = Boolean(message.connected);
         feedSource = message.source ?? activeDataSource;
         if (feedConnected) {
-          addScreenerDebug("info", "Feed PumpPortal terhubung; menunggu launch baru untuk di-screen.");
+          addScreenerDebug("info", "PumpPortal feed connected; new launches and migrations are streaming in.");
         } else {
-          addScreenerDebug("warning", "Feed terputus; worker akan mencoba menghubungkan ulang.");
+          addScreenerDebug("warning", "Feed disconnected; the worker will reconnect.");
         }
       }
       if (message.type === "status") {
         workerStatus = message.status;
-        if (message.status === "running") addScreenerDebug("info", "Worker siap; screener berjalan.");
+        if (message.status === "running") addScreenerDebug("info", "Worker ready; the desk is screening.");
       }
       if (message.type === "screener-status" && message.status && typeof message.status === "object") {
         screenerStatus = message.status;
@@ -264,7 +286,7 @@ app.post("/api/start", (req, res) => {
     child.on("error", (error) => {
       addLog(`[worker error] ${error.message}`);
       workerStatus = "error";
-      addScreenerDebug("error", `Worker gagal dijalankan: ${error.message}`);
+      addScreenerDebug("error", `Worker failed to start: ${error.message}`);
     });
     child.on("exit", (code, signal) => {
       if (stderrBuffer.trim()) {
@@ -279,11 +301,11 @@ app.post("/api/start", (req, res) => {
       screenerStatus = { ...emptyStatus(), updatedAt: new Date().toISOString() };
       addLog(`[debug] Worker exit: code=${code ?? "null"}, signal=${signal ?? "none"}.`);
       if (workerStatus === "error") {
-        addLog("Bot berhenti karena error; periksa pesan worker stderr di atas.");
-        addScreenerDebug("error", `Worker berhenti karena error (code ${code ?? "null"}, signal ${signal ?? "none"}).`);
+        addLog("The desk stopped on an error; see the worker stderr above.");
+        addScreenerDebug("error", `Worker stopped on an error (code ${code ?? "null"}, signal ${signal ?? "none"}).`);
       } else {
-        addLog("Bot dihentikan.");
-        addScreenerDebug("info", "Scanner dihentikan; tidak ada token yang sedang di-screen.");
+        addLog("The desk was stopped.");
+        addScreenerDebug("info", "The desk is stopped; nothing is being screened.");
       }
     });
 
@@ -292,32 +314,48 @@ app.post("/api/start", (req, res) => {
     workerStatus = "error";
     screenerStatus = { ...screenerStatus, phase: "error", updatedAt: new Date().toISOString() };
     addLog(`[start error] ${error.message}`);
-    addScreenerDebug("error", `Start gagal: ${error.message}`);
+    addScreenerDebug("error", `Start failed: ${error.message}`);
     res.status(400).json({ error: error.message });
   }
 });
 
+// A patch of shown values from one agent's settings sheet. Saving is allowed whether or not the
+// desk is running: with a worker up the change is sent straight through, without one it is held
+// until the next Start.
 app.post("/api/settings", (req, res) => {
-  if (!worker || !["starting", "running"].includes(workerStatus)) {
-    return res.status(409).json({ error: "Jalankan paper scanner sebelum mengubah strategi live." });
-  }
-
   try {
-    const settings = parseSettings(req.body?.settings);
-    loadConfig(envForSettings(settings, sessionApiKey || configuredApiKey(), activeDataSource));
-    const child = worker;
-    child.send({ type: "update-settings", settings: settingsForWorker(settings) }, (error) => {
+    const patch = req.body?.settings;
+    if (!patch || typeof patch !== "object") throw new Error("No settings were sent.");
+
+    const overrides = { ...settingOverrides, ...envOverrides(patch) };
+    // loadConfig owns every range and cross-field rule, so a bad value is refused here and the
+    // overrides are left exactly as they were.
+    const nextConfig = loadConfig(envWith(overrides));
+
+    settingOverrides = overrides;
+    activeConfig = nextConfig;
+    const changed = Object.keys(patch).length;
+    const running = Boolean(worker) && ["starting", "running"].includes(workerStatus);
+
+    if (!running) {
+      pendingRestart = true;
+      addLog(`[settings] ${changed} setting(s) saved; they apply on the next Start.`);
+      return res.json({ ok: true, changed, applied: false, pendingRestart, values: shownValues(activeConfig) });
+    }
+
+    worker.send({ type: "update-settings", settings: overrides }, (error) => {
       if (error) {
-        addLog(`[settings error] Gagal mengirim konfigurasi ke bot: ${error.message}`);
-        return res.status(500).json({ error: "Konfigurasi tidak terkirim ke bot." });
+        addLog(`[settings error] Could not reach the desk: ${error.message}`);
+        pendingRestart = true;
+        return res.status(500).json({ error: "The desk did not receive the change; it will apply on the next Start." });
       }
-      activeSettings = settings;
-      addLog("[debug] Perubahan strategi dikirim ke bot aktif.");
-      res.json({ ok: true });
+      pendingRestart = false;
+      addLog(`[settings] ${changed} setting(s) applied to the running desk.`);
+      res.json({ ok: true, changed, applied: true, pendingRestart, values: shownValues(activeConfig) });
     });
   } catch (error) {
     addLog(`[settings error] ${error.message}`);
-    addScreenerDebug("error", `Update strategi gagal: ${error.message}`);
+    addScreenerDebug("error", `Settings rejected: ${error.message}`);
     res.status(400).json({ error: error.message });
   }
 });
@@ -326,18 +364,18 @@ app.post("/api/settings", (req, res) => {
 // at the last price it saw, with the usual simulated fee and slippage.
 app.post("/api/close", (req, res) => {
   if (!worker || !["starting", "running"].includes(workerStatus)) {
-    return res.status(409).json({ error: "Bot tidak sedang berjalan." });
+    return res.status(409).json({ error: "The desk is not running." });
   }
   const mint = typeof req.body?.mint === "string" && req.body.mint ? req.body.mint : null;
   if (mint && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) {
-    return res.status(400).json({ error: "Alamat koin tidak valid." });
+    return res.status(400).json({ error: "That is not a valid coin address." });
   }
   worker.send({ type: "close-position", mint }, (error) => {
     if (error) {
-      addLog(`[close error] Gagal mengirim perintah tutup: ${error.message}`);
-      return res.status(500).json({ error: "Perintah tidak terkirim ke bot." });
+      addLog(`[close error] Could not send the close order: ${error.message}`);
+      return res.status(500).json({ error: "The desk did not receive the close order." });
     }
-    addLog(mint ? `Perintah tutup manual dikirim untuk ${mint.slice(0, 8)}…` : "Perintah tutup SEMUA posisi dikirim.");
+    addLog(mint ? `Manual close sent for ${mint.slice(0, 8)}…` : "Manual close sent for EVERY open position.");
     res.json({ ok: true });
   });
 });
@@ -345,22 +383,24 @@ app.post("/api/close", (req, res) => {
 app.post("/api/stop", (_req, res) => {
   if (!worker) return res.json({ ok: true, status: "stopped" });
   workerStatus = "stopping";
-  addLog("Menghentikan scanner…");
+  addLog("Stopping the desk…");
   worker.kill("SIGTERM");
   res.json({ ok: true, status: workerStatus });
 });
 
 app.post("/api/reset-account", (req, res) => {
-  if (worker) return res.status(409).json({ error: "Hentikan bot sebelum reset paper account." });
+  if (worker) return res.status(409).json({ error: "Stop the desk before resetting the paper account." });
   const balance = Number(req.body?.balanceSol);
   if (!Number.isFinite(balance) || balance <= 0 || balance > 1_000_000) {
-    return res.status(400).json({ error: "Saldo awal harus lebih besar dari 0 SOL." });
+    return res.status(400).json({ error: "The starting balance must be greater than 0 SOL." });
   }
   const state = freshState(balance);
   fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
   fs.writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  activeSettings.paperStartBalanceSol = balance;
-  addLog(`Paper account direset ke ${balance} SOL.`);
+  invalidatePaperState();
+  settingOverrides = { ...settingOverrides, PAPER_START_BALANCE_SOL: String(balance) };
+  activeConfig = loadConfig(envWith());
+  addLog(`Paper account reset to ${balance} SOL.`);
   res.json({ ok: true });
 });
 
@@ -373,7 +413,7 @@ app.use("/api", (req, res) => {
 
 const httpServer = app.listen(PORT, HOST, () => {
   console.log(`Paper trading dashboard: http://${HOST}:${PORT}`);
-  addLog(`[web] Dashboard aktif di http://${HOST}:${PORT}.`);
+  addLog(`[web] Dashboard listening on http://${HOST}:${PORT}.`);
 });
 
 function shutdownServer() {

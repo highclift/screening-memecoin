@@ -179,7 +179,7 @@ export function createScout({ config, universe, feed, logger, devBook, log, note
       name: typeof event.name === "string" ? event.name.slice(0, 80) : undefined,
       symbol: typeof event.symbol === "string" ? event.symbol.slice(0, 24) : undefined,
     }, "migration");
-    if (record) note("candidate", `Koin migrasi ke pool AMM: ${record.symbol || record.mint.slice(0, 8)} masuk screening.`, record.mint);
+    if (record) note("candidate", `Migrated to an AMM pool: ${record.symbol || record.mint.slice(0, 8)} enters screening.`, record.mint);
   }
 
   // ---------- GeckoTerminal: every pool, any age ----------

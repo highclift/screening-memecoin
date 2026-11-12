@@ -110,7 +110,7 @@ export function createExecutor({ config, universe, account, risk, logger, persis
       levels: entry.levels,
     });
     logger.say(`[executor] BUY ${record.symbol || record.mint.slice(0, 8)} ${usd(record.marketCapUsd)} score=${record.analysis?.score ?? "?"} ${entry.trigger} | ${costSol.toFixed(5)} SOL, stop -${(entry.levels.stopPct * 100).toFixed(0)}%, trail ${(entry.levels.trailPct * 100).toFixed(0)}% after +${(entry.levels.trailAfterPct * 100).toFixed(0)}%`);
-    logger.tell("entry", `Executor entry ${record.symbol || record.mint.slice(0, 8)} di ${usd(record.marketCapUsd)}; stop -${(entry.levels.stopPct * 100).toFixed(0)}%, trailing aktif setelah +${(entry.levels.trailAfterPct * 100).toFixed(0)}%.`, record.mint);
+    logger.tell("entry", `Bought at ${usd(record.marketCapUsd)}; stop -${(entry.levels.stopPct * 100).toFixed(0)}%, trail arms at +${(entry.levels.trailAfterPct * 100).toFixed(0)}%.`, record.mint);
     return true;
   }
 
@@ -172,7 +172,7 @@ export function createExecutor({ config, universe, account, risk, logger, persis
       levels: position.levels,
     });
     logger.say(`[executor] SELL:${reason} ${position.symbol || mint.slice(0, 8)} ${usd(marketCapUsd ?? position.lastMarketCapUsd)} pnl=${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL | balance=${account.balanceSol.toFixed(5)} SOL`);
-    logger.tell("exit", `Executor exit ${reason} di ${usd(marketCapUsd ?? position.lastMarketCapUsd)}; PnL ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL.`, mint);
+    logger.tell("exit", `Sold on ${reason} at ${usd(marketCapUsd ?? position.lastMarketCapUsd)}; P&L ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL.`, mint);
   }
 
   // ---------- entry timing ----------
@@ -289,7 +289,7 @@ export function createExecutor({ config, universe, account, risk, logger, persis
       const watchState = watchlist.get(mint);
       if (!watchState) return;
       if (!isCandidate(mint)) {
-        unwatch(mint, "tidak lagi lolos analyst");
+        unwatch(mint, "no longer passes the analyst");
         return;
       }
 
@@ -316,7 +316,7 @@ export function createExecutor({ config, universe, account, risk, logger, persis
 
       for (const [mint, watchState] of watchlist) {
         if (now - watchState.addedAt >= config.watchGraceMs) {
-          unwatch(mint, "tidak ada sinyal entry dalam masa pantau");
+          unwatch(mint, "no entry signal while it was watched");
         }
       }
     },
@@ -334,8 +334,8 @@ export function createExecutor({ config, universe, account, risk, logger, persis
       if (closed) {
         logger.say(`[executor] MANUAL EXIT: closed ${closed} position${closed === 1 ? "" : "s"} on request.`);
         logger.tell("exit", closed === 1
-          ? "Posisi ditutup manual dari dashboard."
-          : `${closed} posisi ditutup manual dari dashboard.`, mint ?? "");
+          ? "Position closed by hand from the dashboard."
+          : `${closed} positions closed by hand from the dashboard.`, mint ?? "");
       }
       return closed;
     },

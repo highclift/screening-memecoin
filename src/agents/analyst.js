@@ -104,7 +104,7 @@ export function createAnalyst({ config, universe, feed, smartWallets, logger, on
           parts: analysis.parts,
         }, { write: true, now });
         logger.say(`[analyst] ${record.symbol || record.mint.slice(0, 8)} scores ${analysis.score}/100 (${analysis.lead} leading, ${analysis.measured}/${analysis.of} parts measured) -> executor`);
-        logger.tell("candidate", `Analyst memberi skor ${analysis.score}/100 untuk ${record.symbol || record.mint.slice(0, 8)}; diserahkan ke executor.`, record.mint);
+        logger.tell("candidate", `Scored ${analysis.score}/100; handed to the executor.`, record.mint);
       }
       onPassed?.(record, analysis);
       return analysis;
